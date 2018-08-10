@@ -7,6 +7,6 @@ pipeline:
   intent_split_symbol: "_"
   out_of_scope_training_flag: true
   out_of_scope_intent: 'request_outofscope'
-    out_of_scope_soft_threshold: 0.9
+  out_of_scope_soft_threshold: 0.9
   mu_pos: 0.7
-  mu_neg: 0.4
+  mu_neg: -0.4

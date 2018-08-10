@@ -9,4 +9,4 @@ pipeline:
   out_of_scope_intent: 'request_outofscope'
   out_of_scope_soft_threshold: 0.9
   mu_pos: 1.0
-  mu_neg: -0.3
+  mu_neg: -0.0
