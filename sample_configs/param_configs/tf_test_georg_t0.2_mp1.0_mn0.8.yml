@@ -1,0 +1,12 @@
+language: "en"
+
+pipeline:
+- name: "intent_featurizer_count_vectors"
+- name: "intent_classifier_tensorflow_embedding"
+  intent_tokenization_flag: true
+  intent_split_symbol: "_"
+  out_of_scope_training_flag: true
+  out_of_scope_intent: 'request_outofscope'
+    out_of_scope_soft_threshold: 0.2
+  mu_pos: 1.0
+  mu_neg: 0.8

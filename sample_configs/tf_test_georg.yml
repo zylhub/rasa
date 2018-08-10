@@ -6,8 +6,7 @@ pipeline:
   intent_tokenization_flag: true
   intent_split_symbol: "_"
   out_of_scope_training_flag: true
-  out_of_scope_intent: 'out_of_scope'
-  out_of_scope_soft_threshold: 0.5
-
-
-  
+  out_of_scope_intent: 'request_outofscope'
+  out_of_scope_soft_threshold: .6
+  mu_pos: 0.8
+  mu_neg: -0.8
