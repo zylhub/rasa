@@ -11,8 +11,11 @@ from rasa_nlu.config import RasaNLUModelConfig
 
 from tests.conftest import DEFAULT_DATA_PATH
 from rasa_nlu import registry, train
+from rasa_nlu.utils import read_yaml
+from rasa_nlu.config import RasaNLUModelConfig
 from rasa_nlu.model import Trainer, Interpreter
 from rasa_nlu.train import create_persistor
+from rasa_nlu.evaluate import run_evaluation
 from rasa_nlu.training_data import TrainingData
 from tests import utilities
 
@@ -223,3 +226,27 @@ def test_train_with_empty_data(language, pipeline, component_builder, tmpdir):
     assert loaded.pipeline
     assert loaded.parse("hello") is not None
     assert loaded.parse("Hello today is Monday, again!") is not None
+
+
+@utilities.slowtest
+def test_train_evaluate_model(pipeline_template, component_builder, tmpdir):
+    config_yml = "\n".join(
+        "language: en",
+        "pipeline: tensorflow_embedding")
+    _config = RasaNLUModelConfig(read_yaml(config_yml))
+    (trained, _, persisted_path) = train.do_train(
+            _config,
+            path=tmpdir.strpath,
+            data=DEFAULT_DATA_PATH,
+            component_builder=component_builder)
+    assert trained.pipeline
+    loaded = Interpreter.load(persisted_path, component_builder)
+    # evaluate, passing in an Interpreter object
+    evaluation = run_evaluation(DEFAULT_DATA_PATH, trained)
+    assert evaluation.get('intent_evaluation') is not None
+    assert evaluation['intent_evaluation'].get['f1_score'] is not None
+
+    # evaluate, passing in a path to a trained model
+    evaluation = run_evaluation(DEFAULT_DATA_PATH, persisted_path)
+    assert evaluation.get('intent_evaluation') is not None
+    assert evaluation['intent_evaluation'].get['f1_score'] is not None
