@@ -20,6 +20,15 @@ RUN pip install -r alt_requirements/requirements_bare.txt
 
 RUN pip install -e .
 
+ENV APP_ROOT=/app
+ENV PATH=${APP_ROOT}:${PATH} HOME=${APP_ROOT}
+RUN chmod -R u+x ${APP_ROOT} && \
+    chgrp -R 0 ${APP_ROOT} && \
+    chmod -R g=u ${APP_ROOT}
+
+USER 10001
+WORKDIR ${APP_ROOT}
+
 VOLUME ["/app/projects", "/app/logs", "/app/data"]
 
 EXPOSE 5000
