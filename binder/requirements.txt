@@ -7,3 +7,6 @@
 # Tensorflow Requirements
 -r ../alt_requirements/requirements_tensorflow_sklearn.txt
 
+# Service identity
+service_identity==18.1.0
+
