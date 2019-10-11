@@ -7,23 +7,27 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Text, Optional, Any, List, Dict, Tuple
 
-import numpy as np
-
 import rasa.core
-import rasa.constants
 import rasa.utils.io
+from rasa.constants import MINIMUM_COMPATIBLE_VERSION, DOCS_BASE_URL
 
 from rasa.core import utils, training
-from rasa.core.actions.action import ACTION_LISTEN_NAME
+from rasa.core.constants import USER_INTENT_BACK, USER_INTENT_RESTART
+from rasa.core.actions.action import (
+    ACTION_LISTEN_NAME,
+    ACTION_BACK_NAME,
+    ACTION_RESTART_NAME,
+)
 from rasa.core.domain import Domain
 from rasa.core.events import SlotSet, ActionExecuted, ActionExecutionRejected
 from rasa.core.exceptions import UnsupportedDialogueModelError
 from rasa.core.featurizers import MaxHistoryTrackerFeaturizer
-from rasa.core.policies import Policy
+from rasa.core.policies.policy import Policy
 from rasa.core.policies.fallback import FallbackPolicy
 from rasa.core.policies.memoization import MemoizationPolicy, AugmentedMemoizationPolicy
 from rasa.core.trackers import DialogueStateTracker
 from rasa.core import registry
+from rasa.utils.common import class_from_module_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,22 @@ class PolicyEnsemble(object):
             self.action_fingerprints = {}
 
         self._check_priorities()
+        self._check_for_important_policies()
+
+    def _check_for_important_policies(self):
+        from rasa.core.policies.mapping_policy import MappingPolicy
+
+        if not any(isinstance(policy, MappingPolicy) for policy in self.policies):
+            logger.info(
+                "MappingPolicy not included in policy ensemble. Default intents "
+                "'{} and {} will not trigger actions '{}' and '{}'."
+                "".format(
+                    USER_INTENT_RESTART,
+                    USER_INTENT_BACK,
+                    ACTION_RESTART_NAME,
+                    ACTION_BACK_NAME,
+                )
+            )
 
     @staticmethod
     def _training_events_from_trackers(training_trackers):
@@ -58,6 +78,24 @@ class PolicyEnsemble(object):
                     events_metadata[action_name].add(event)
 
         return events_metadata
+
+    @staticmethod
+    def check_domain_ensemble_compatibility(
+        ensemble: Optional["PolicyEnsemble"], domain: Optional[Domain]
+    ) -> None:
+        """Check for elements that only work with certain policy/domain combinations."""
+
+        from rasa.core.policies.form_policy import FormPolicy
+        from rasa.core.policies.mapping_policy import MappingPolicy
+        from rasa.core.policies.two_stage_fallback import TwoStageFallbackPolicy
+
+        policies_needing_validation = [
+            FormPolicy,
+            MappingPolicy,
+            TwoStageFallbackPolicy,
+        ]
+        for policy in policies_needing_validation:
+            policy.validate_against_domain(ensemble, domain)
 
     def _check_priorities(self) -> None:
         """Checks for duplicate policy priorities within PolicyEnsemble."""
@@ -74,9 +112,8 @@ class PolicyEnsemble(object):
                         "in PolicyEnsemble. When personalizing "
                         "priorities, be sure to give all policies "
                         "different priorities. More information: "
-                        "https://rasa.com/docs/core/"
-                        "policies/"
-                    ).format(v, k)
+                        "{}/core/policies/"
+                    ).format(v, k, DOCS_BASE_URL)
                 )
 
     def train(
@@ -95,11 +132,10 @@ class PolicyEnsemble(object):
 
     def probabilities_using_best_policy(
         self, tracker: DialogueStateTracker, domain: Domain
-    ) -> Tuple[List[float], Text]:
+    ) -> Tuple[Optional[List[float]], Optional[Text]]:
         raise NotImplementedError
 
-    def _max_histories(self):
-        # type: () -> List[Optional[int]]
+    def _max_histories(self) -> List[Optional[int]]:
         """Return max history."""
 
         max_histories = []
@@ -131,7 +167,8 @@ class PolicyEnsemble(object):
         for package_name in self.versioned_packages:
             try:
                 p = importlib.import_module(package_name)
-                metadata[package_name] = p.__version__
+                v = p.__version__  # pytype: disable=attribute-error
+                metadata[package_name] = v
             except ImportError:
                 pass
 
@@ -143,7 +180,7 @@ class PolicyEnsemble(object):
         # make sure the directory we persist exists
         domain_spec_path = os.path.join(path, "metadata.json")
         training_data_path = os.path.join(path, "stories.md")
-        utils.create_dir_for_file(domain_spec_path)
+        rasa.utils.io.create_directory_for_file(domain_spec_path)
 
         policy_names = [utils.module_path_from_instance(p) for p in self.policies]
 
@@ -190,14 +227,14 @@ class PolicyEnsemble(object):
         from packaging import version
 
         if version_to_check is None:
-            version_to_check = rasa.constants.MINIMUM_COMPATIBLE_VERSION
+            version_to_check = MINIMUM_COMPATIBLE_VERSION
 
         model_version = metadata.get("rasa", "0.0.0")
         if version.parse(model_version) < version.parse(version_to_check):
             raise UnsupportedDialogueModelError(
-                "The model version is to old to be "
+                "The model version is too old to be "
                 "loaded by this Rasa Core instance. "
-                "Either retrain the model, or run with"
+                "Either retrain the model, or run with "
                 "an older version. "
                 "Model version: {} Instance version: {} "
                 "Minimal compatible version: {}"
@@ -232,14 +269,18 @@ class PolicyEnsemble(object):
             policy = policy_cls.load(policy_path)
             cls._ensure_loaded_policy(policy, policy_cls, policy_name)
             policies.append(policy)
-        ensemble_cls = utils.class_from_module_path(metadata["ensemble_name"])
+        ensemble_cls = class_from_module_path(metadata["ensemble_name"])
         fingerprints = metadata.get("action_fingerprints", {})
         ensemble = ensemble_cls(policies, fingerprints)
         return ensemble
 
     @classmethod
-    def from_dict(cls, dictionary: Dict[Text, Any]) -> List[Policy]:
-        policies = dictionary.get("policies") or dictionary.get("policy")
+    def from_dict(cls, policy_configuration: Dict[Text, Any]) -> List[Policy]:
+        import copy
+
+        policies = policy_configuration.get("policies") or policy_configuration.get(
+            "policy"
+        )
         if policies is None:
             raise InvalidPolicyConfig(
                 "You didn't define any policies. "
@@ -251,10 +292,10 @@ class PolicyEnsemble(object):
                 "The policy configuration file has to include at least one policy."
             )
 
+        policies = copy.deepcopy(policies)  # don't manipulate passed `Dict`
         parsed_policies = []
 
         for policy in policies:
-
             policy_name = policy.pop("name")
             if policy.get("featurizer"):
                 featurizer_func, featurizer_config = cls.get_featurizer_from_dict(
@@ -333,7 +374,9 @@ class SimplePolicyEnsemble(PolicyEnsemble):
 
     def probabilities_using_best_policy(
         self, tracker: DialogueStateTracker, domain: Domain
-    ) -> Tuple[List[float], Text]:
+    ) -> Tuple[Optional[List[float]], Optional[Text]]:
+        import numpy as np
+
         result = None
         max_confidence = -1
         best_policy_name = None
@@ -342,12 +385,14 @@ class SimplePolicyEnsemble(PolicyEnsemble):
         for i, p in enumerate(self.policies):
             probabilities = p.predict_action_probabilities(tracker, domain)
 
-            if isinstance(tracker.events[-1], ActionExecutionRejected):
+            if len(tracker.events) > 0 and isinstance(
+                tracker.events[-1], ActionExecutionRejected
+            ):
                 probabilities[
                     domain.index_for_action(tracker.events[-1].action_name)
                 ] = 0.0
-            confidence = np.max(probabilities)
 
+            confidence = np.max(probabilities)
             if (confidence, p.priority) > (max_confidence, best_policy_priority):
                 max_confidence = confidence
                 result = probabilities
@@ -355,7 +400,9 @@ class SimplePolicyEnsemble(PolicyEnsemble):
                 best_policy_priority = p.priority
 
         if (
-            result.index(max_confidence) == domain.index_for_action(ACTION_LISTEN_NAME)
+            result is not None
+            and result.index(max_confidence)
+            == domain.index_for_action(ACTION_LISTEN_NAME)
             and tracker.latest_action_name == ACTION_LISTEN_NAME
             and self.is_not_memo_policy(best_policy_name)
         ):
@@ -386,10 +433,6 @@ class SimplePolicyEnsemble(PolicyEnsemble):
                 best_policy_name = "policy_{}_{}".format(
                     fallback_idx, type(fallback_policy).__name__
                 )
-
-        # normalize probabilities
-        if np.sum(result) != 0:
-            result = result / np.nansum(result)
 
         logger.debug("Predicted next action using {}".format(best_policy_name))
         return result, best_policy_name

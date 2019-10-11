@@ -1,3 +1,4 @@
+import asyncio
 import sys
 
 import json
@@ -12,15 +13,8 @@ from rasa.core.utils import AvailableEndpoints
 from rasa.utils.endpoints import EndpointConfig, ClientResponseError
 
 
-@pytest.fixture(scope="session")
-def loop():
-    from pytest_sanic.plugin import loop as sanic_loop
-
-    return rasa.utils.io.enable_async_loop_debugging(next(sanic_loop()))
-
-
-async def test_moodbot_example(trained_moodbot_path):
-    agent = Agent.load(trained_moodbot_path)
+async def test_moodbot_example(unpacked_trained_moodbot_path):
+    agent = Agent.load(unpacked_trained_moodbot_path)
 
     responses = await agent.handle_text("/greet")
     assert responses[0]["text"] == "Hey! How are you?"
@@ -44,7 +38,7 @@ async def test_formbot_example():
         stories,
         os.path.join(p, "models", "dialogue"),
         endpoints=endpoints,
-        policy_config="rasa/core/default_config.yml",
+        policy_config="rasa/cli/default_config.yml",
     )
     response = {
         "events": [
@@ -93,13 +87,13 @@ async def test_restaurantbot_example():
     p = "examples/restaurantbot/"
     stories = os.path.join("data", "test_stories", "stories_babi_small.md")
     nlu_data = os.path.join(p, "data", "nlu.md")
-    core_model_path = await train_core(
-        os.path.join(p, "domain.yml"), os.path.join(p, "models", "core"), stories
+    await train_core(
+        os.path.join(p, "domain.yml"), os.path.join(p, "models"), "current", stories
     )
-    nlu_model_path = train_nlu(
-        os.path.join(p, "config.yml"), os.path.join(p, "models", "nlu"), nlu_data
+    train_nlu(
+        os.path.join(p, "config.yml"), os.path.join(p, "models"), "current", nlu_data
     )
 
-    responses = await parse("hello", core_model_path, nlu_model_path)
+    responses = await parse("hello", os.path.join(p, "models", "current"))
 
     assert responses[0]["text"] == "how can I help you?"

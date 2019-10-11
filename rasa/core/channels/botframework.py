@@ -6,9 +6,10 @@ import logging
 import requests
 from sanic import Blueprint, response
 from sanic.request import Request
-from typing import Text, Dict, Any
+from typing import Text, Dict, Any, List, Iterable, Callable, Awaitable, Optional
 
 from rasa.core.channels.channel import UserMessage, OutputChannel, InputChannel
+from sanic.response import HTTPResponse
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class BotFramework(OutputChannel):
     headers = None
 
     @classmethod
-    def name(cls):
+    def name(cls) -> Text:
         return "botframework"
 
     def __init__(
@@ -62,9 +63,8 @@ class BotFramework(OutputChannel):
                 access_token = token_data["access_token"]
                 token_expiration = token_data["expires_in"]
 
-                BotFramework.token_expiration_date = datetime.datetime.now() + datetime.timedelta(
-                    seconds=int(token_expiration)
-                )
+                delta = datetime.timedelta(seconds=int(token_expiration))
+                BotFramework.token_expiration_date = datetime.datetime.now() + delta
 
                 BotFramework.headers = {
                     "content-type": "application/json",
@@ -76,11 +76,9 @@ class BotFramework(OutputChannel):
         else:
             return BotFramework.headers
 
-    async def send(self, recipient_id: Text, message_data: Dict[Text, Any]) -> None:
-
-        post_message_uri = "{}conversations/{}/activities".format(
-            self.global_uri, self.conversation["id"]
-        )
+    def prepare_message(
+        self, recipient_id: Text, message_data: Dict[Text, Any]
+    ) -> Dict[Text, Any]:
         data = {
             "type": "message",
             "recipient": {"id": recipient_id},
@@ -88,11 +86,16 @@ class BotFramework(OutputChannel):
             "channelData": {"notification": {"alert": "true"}},
             "text": "",
         }
-
         data.update(message_data)
+        return data
+
+    async def send(self, message_data: Dict[Text, Any]) -> None:
+        post_message_uri = "{}conversations/{}/activities".format(
+            self.global_uri, self.conversation["id"]
+        )
         headers = await self._get_headers()
         send_response = requests.post(
-            post_message_uri, headers=headers, data=json.dumps(data)
+            post_message_uri, headers=headers, data=json.dumps(message_data)
         )
 
         if not send_response.ok:
@@ -101,46 +104,79 @@ class BotFramework(OutputChannel):
                 send_response.text,
             )
 
-    async def send_text_message(self, recipient_id, message):
-        for message_part in message.split("\n\n"):
+    async def send_text_message(
+        self, recipient_id: Text, text: Text, **kwargs: Any
+    ) -> None:
+        for message_part in text.split("\n\n"):
             text_message = {"text": message_part}
-            await self.send(recipient_id, text_message)
+            message = self.prepare_message(recipient_id, text_message)
+            await self.send(message)
 
-    async def send_image_url(self, recipient_id, image_url):
+    async def send_image_url(
+        self, recipient_id: Text, image: Text, **kwargs: Any
+    ) -> None:
         hero_content = {
             "contentType": "application/vnd.microsoft.card.hero",
-            "content": {"images": [{"url": image_url}]},
+            "content": {"images": [{"url": image}]},
         }
 
         image_message = {"attachments": [hero_content]}
-        await self.send(recipient_id, image_message)
+        message = self.prepare_message(recipient_id, image_message)
+        await self.send(message)
 
-    async def send_text_with_buttons(self, recipient_id, message, buttons, **kwargs):
+    async def send_text_with_buttons(
+        self,
+        recipient_id: Text,
+        text: Text,
+        buttons: List[Dict[Text, Any]],
+        **kwargs: Any
+    ) -> None:
         hero_content = {
             "contentType": "application/vnd.microsoft.card.hero",
-            "content": {"subtitle": message, "buttons": buttons},
+            "content": {"subtitle": text, "buttons": buttons},
         }
 
         buttons_message = {"attachments": [hero_content]}
-        await self.send(recipient_id, buttons_message)
+        message = self.prepare_message(recipient_id, buttons_message)
+        await self.send(message)
 
-    async def send_custom_message(self, recipient_id, elements):
-        await self.send(recipient_id, elements[0])
+    async def send_elements(
+        self, recipient_id: Text, elements: Iterable[Dict[Text, Any]], **kwargs: Any
+    ) -> None:
+        for e in elements:
+            message = self.prepare_message(recipient_id, e)
+            await self.send(message)
+
+    async def send_custom_json(
+        self, recipient_id: Text, json_message: Dict[Text, Any], **kwargs: Any
+    ) -> None:
+        # pytype: disable=attribute-error
+        json_message.setdefault("type", "message")
+        json_message.setdefault("recipient", {}).setdefault("id", recipient_id)
+        json_message.setdefault("from", self.bot)
+        json_message.setdefault("channelData", {}).setdefault(
+            "notification", {}
+        ).setdefault("alert", "true")
+        json_message.setdefault("text", "")
+        await self.send(json_message)
+        # pytype: enable=attribute-error
 
 
 class BotFrameworkInput(InputChannel):
     """Bot Framework input channel implementation."""
 
     @classmethod
-    def name(cls):
+    def name(cls) -> Text:
         return "botframework"
 
     @classmethod
-    def from_credentials(cls, credentials):
+    def from_credentials(cls, credentials: Optional[Dict[Text, Any]]) -> InputChannel:
         if not credentials:
             cls.raise_missing_credentials_exception()
 
+        # pytype: disable=attribute-error
         return cls(credentials.get("app_id"), credentials.get("app_password"))
+        # pytype: enable=attribute-error
 
     def __init__(self, app_id: Text, app_password: Text) -> None:
         """Create a Bot Framework input channel.
@@ -153,17 +189,21 @@ class BotFrameworkInput(InputChannel):
         self.app_id = app_id
         self.app_password = app_password
 
-    def blueprint(self, on_new_message):
+    def blueprint(
+        self, on_new_message: Callable[[UserMessage], Awaitable[Any]]
+    ) -> Blueprint:
 
         botframework_webhook = Blueprint("botframework_webhook", __name__)
 
+        # noinspection PyUnusedLocal
         @botframework_webhook.route("/", methods=["GET"])
-        async def health(request):
+        async def health(request: Request) -> HTTPResponse:
             return response.json({"status": "ok"})
 
         @botframework_webhook.route("/webhook", methods=["POST"])
-        async def webhook(request: Request):
+        async def webhook(request: Request) -> HTTPResponse:
             postdata = request.json
+            metadata = self.get_metadata(request)
 
             try:
                 if postdata["type"] == "message":
@@ -180,6 +220,7 @@ class BotFrameworkInput(InputChannel):
                         out_channel,
                         postdata["from"]["id"],
                         input_channel=self.name(),
+                        metadata=metadata,
                     )
                     await on_new_message(user_msg)
                 else:

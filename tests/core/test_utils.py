@@ -1,15 +1,16 @@
 import os
+from decimal import Decimal
+from typing import Optional, Text, Union
+
 import pytest
 
+import rasa.core.lock_store
 import rasa.utils.io
+from rasa.constants import ENV_SANIC_WORKERS
 from rasa.core import utils
-
-
-@pytest.fixture(scope="session")
-def loop():
-    from pytest_sanic.plugin import loop as sanic_loop
-
-    return rasa.utils.io.enable_async_loop_debugging(next(sanic_loop()))
+from rasa.core.lock_store import LockStore, RedisLockStore, InMemoryLockStore
+from rasa.core.utils import replace_floats_with_decimals
+from rasa.utils.endpoints import EndpointConfig
 
 
 def test_is_int():
@@ -48,36 +49,6 @@ def test_on_hot_out_of_range():
         utils.one_hot(4, 3)
 
 
-def test_list_routes(default_agent):
-    from rasa.core import server
-
-    app = server.create_app(default_agent, auth_token=None)
-
-    routes = utils.list_routes(app)
-    assert set(routes.keys()) == {
-        "hello",
-        "version",
-        "execute_action",
-        "append_event",
-        "replace_events",
-        "list_trackers",
-        "retrieve_tracker",
-        "retrieve_story",
-        "respond",
-        "predict",
-        "parse",
-        "train_stack",
-        "evaluate_intents",
-        "log_message",
-        "load_model",
-        "evaluate_stories",
-        "get_domain",
-        "continue_training",
-        "status",
-        "tracker_predict",
-    }
-
-
 def test_cap_length():
     assert utils.cap_length("mystring", 6) == "mys..."
 
@@ -90,15 +61,6 @@ def test_cap_length_with_short_string():
     assert utils.cap_length("my", 3) == "my"
 
 
-def test_pad_list_to_size():
-    assert utils.pad_list_to_size(["e1", "e2"], 4, "other") == [
-        "e1",
-        "e2",
-        "other",
-        "other",
-    ]
-
-
 def test_read_lines():
     lines = utils.read_lines(
         "data/test_stories/stories.md", max_line_limit=2, line_pattern=r"\*.*"
@@ -109,68 +71,105 @@ def test_read_lines():
     assert len(lines) == 2
 
 
-os.environ["USER_NAME"] = "user"
-os.environ["PASS"] = "pass"
+def test_pad_lists_to_size():
+    list_x = [1, 2, 3]
+    list_y = ["a", "b"]
+    list_z = [None, None, None]
+
+    assert utils.pad_lists_to_size(list_x, list_y) == (list_x, ["a", "b", None])
+    assert utils.pad_lists_to_size(list_y, list_x, "c") == (["a", "b", "c"], list_x)
+    assert utils.pad_lists_to_size(list_z, list_x) == (list_z, list_x)
 
 
-def test_read_yaml_string():
-    config_without_env_var = """
-    user: user
-    password: pass
-    """
-    r = rasa.utils.io.read_yaml(config_without_env_var)
-    assert r["user"] == "user" and r["password"] == "pass"
+def test_convert_bytes_to_string():
+    # byte string will be decoded
+    byte_string = b"\xcf\x84o\xcf\x81\xce\xbdo\xcf\x82"
+    decoded_string = "τoρνoς"
+    assert utils.convert_bytes_to_string(byte_string) == decoded_string
+
+    # string remains string
+    assert utils.convert_bytes_to_string(decoded_string) == decoded_string
 
 
-def test_read_yaml_string_with_env_var():
-    config_with_env_var = """
-    user: ${USER_NAME}
-    password: ${PASS}
-    """
-    r = rasa.utils.io.read_yaml(config_with_env_var)
-    assert r["user"] == "user" and r["password"] == "pass"
+def test_float_conversion_to_decimal():
+    # Create test objects
+    d = {
+        "int": -1,
+        "float": 2.1,
+        "list": ["one", "two"],
+        "list_of_floats": [1.0, -2.1, 3.2],
+        "nested_dict_with_floats": {"list_with_floats": [4.5, -5.6], "float": 6.7},
+    }
+    d_replaced = replace_floats_with_decimals(d)
+
+    assert isinstance(d_replaced["int"], int)
+    assert isinstance(d_replaced["float"], Decimal)
+    for t in d_replaced["list"]:
+        assert isinstance(t, str)
+    for f in d_replaced["list_of_floats"]:
+        assert isinstance(f, Decimal)
+    for f in d_replaced["nested_dict_with_floats"]["list_with_floats"]:
+        assert isinstance(f, Decimal)
+    assert isinstance(d_replaced["nested_dict_with_floats"]["float"], Decimal)
 
 
-def test_read_yaml_string_with_multiple_env_vars_per_line():
-    config_with_env_var = """
-    user: ${USER_NAME} ${PASS}
-    password: ${PASS}
-    """
-    r = rasa.utils.io.read_yaml(config_with_env_var)
-    assert r["user"] == "user pass" and r["password"] == "pass"
+@pytest.mark.parametrize(
+    "env_value,lock_store,expected",
+    [
+        (1, "redis", 1),
+        (4, "redis", 4),
+        (None, "redis", 1),
+        (0, "redis", 1),
+        (-4, "redis", 1),
+        ("illegal value", "redis", 1),
+        (None, None, 1),
+        (None, "in_memory", 1),
+        (5, "in_memory", 1),
+        (2, None, 1),
+        (0, "in_memory", 1),
+        (3, RedisLockStore(), 3),
+        (2, InMemoryLockStore(), 1),
+    ],
+)
+def test_get_number_of_sanic_workers(
+    env_value: Optional[Text],
+    lock_store: Union[LockStore, Text, None],
+    expected: Optional[int],
+):
+    # remember pre-test value of SANIC_WORKERS env var
+    pre_test_value = os.environ.get(ENV_SANIC_WORKERS)
+
+    # set env var to desired value and make assertion
+    if env_value is not None:
+        os.environ[ENV_SANIC_WORKERS] = str(env_value)
+
+    # lock_store may be string or LockStore object
+    # create EndpointConfig if it's a string, otherwise pass the object
+    if isinstance(lock_store, str):
+        lock_store = EndpointConfig(type=lock_store)
+
+    assert utils.number_of_sanic_workers(lock_store) == expected
+
+    # reset env var to pre-test value
+    os.environ.pop(ENV_SANIC_WORKERS, None)
+
+    if pre_test_value is not None:
+        os.environ[ENV_SANIC_WORKERS] = pre_test_value
 
 
-def test_read_yaml_string_with_env_var_prefix():
-    config_with_env_var_prefix = """
-    user: db_${USER_NAME}
-    password: db_${PASS}
-    """
-    r = rasa.utils.io.read_yaml(config_with_env_var_prefix)
-    assert r["user"] == "db_user" and r["password"] == "db_pass"
-
-
-def test_read_yaml_string_with_env_var_postfix():
-    config_with_env_var_postfix = """
-    user: ${USER_NAME}_admin
-    password: ${PASS}_admin
-    """
-    r = rasa.utils.io.read_yaml(config_with_env_var_postfix)
-    assert r["user"] == "user_admin" and r["password"] == "pass_admin"
-
-
-def test_read_yaml_string_with_env_var_infix():
-    config_with_env_var_infix = """
-    user: db_${USER_NAME}_admin
-    password: db_${PASS}_admin
-    """
-    r = rasa.utils.io.read_yaml(config_with_env_var_infix)
-    assert r["user"] == "db_user_admin" and r["password"] == "db_pass_admin"
-
-
-def test_read_yaml_string_with_env_var_not_exist():
-    config_with_env_var_not_exist = """
-    user: ${USER_NAME}
-    password: ${PASSWORD}
-    """
-    with pytest.raises(ValueError):
-        rasa.utils.io.read_yaml(config_with_env_var_not_exist)
+@pytest.mark.parametrize(
+    "lock_store,expected",
+    [
+        (EndpointConfig(type="redis"), True),
+        (RedisLockStore(), True),
+        (EndpointConfig(type="in_memory"), False),
+        (EndpointConfig(type="random_store"), False),
+        (None, False),
+        (InMemoryLockStore(), False),
+    ],
+)
+def test_lock_store_is_redis_lock_store(
+    lock_store: Union[EndpointConfig, LockStore, None], expected: bool
+):
+    # noinspection PyProtectedMember
+    assert rasa.core.utils._lock_store_is_redis_lock_store(lock_store) == expected

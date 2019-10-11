@@ -1,9 +1,11 @@
+import asyncio
 import json
+import logging
+import os
+import tempfile
 
 import fakeredis
 import pytest
-import tempfile
-import os
 
 import rasa.utils.io
 from rasa.core import training, restore
@@ -11,6 +13,7 @@ from rasa.core import utils
 from rasa.core.actions.action import ACTION_LISTEN_NAME
 from rasa.core.domain import Domain
 from rasa.core.events import (
+    SlotSet,
     UserUttered,
     ActionExecuted,
     Restarted,
@@ -35,17 +38,14 @@ from tests.core.utilities import (
 domain = Domain.load("examples/moodbot/domain.yml")
 
 
-@pytest.fixture(scope="module")
-def loop():
-    from pytest_sanic.plugin import loop as sanic_loop
-
-    return rasa.utils.io.enable_async_loop_debugging(next(sanic_loop()))
-
-
 class MockRedisTrackerStore(RedisTrackerStore):
     def __init__(self, domain):
         self.red = fakeredis.FakeStrictRedis()
         self.record_exp = None
+
+        # added in redis==3.3.0, but not yet in fakeredis
+        self.red.connection_pool.connection_class.health_check_interval = 0
+
         TrackerStore.__init__(self, domain)
 
 
@@ -207,6 +207,33 @@ def test_tracker_entity_retrieval(default_domain):
     )
     assert list(tracker.get_latest_entity_values("entity_name")) == ["greet"]
     assert list(tracker.get_latest_entity_values("unknown")) == []
+
+
+def test_tracker_update_slots_with_entity(default_domain):
+    tracker = DialogueStateTracker("default", default_domain.slots)
+
+    test_entity = default_domain.entities[0]
+    expected_slot_value = "test user"
+
+    intent = {"name": "greet", "confidence": 1.0}
+    tracker.update(
+        UserUttered(
+            "/greet",
+            intent,
+            [
+                {
+                    "start": 1,
+                    "end": 5,
+                    "value": expected_slot_value,
+                    "entity": test_entity,
+                    "extractor": "manual",
+                }
+            ],
+        ),
+        default_domain,
+    )
+
+    assert tracker.get_slot(test_entity) == expected_slot_value
 
 
 def test_restart_event(default_domain):
@@ -537,3 +564,15 @@ def test_last_executed_has_not_name():
     tracker = get_tracker(events)
 
     assert tracker.last_executed_action_has("another") is False
+
+
+@pytest.mark.parametrize("key, value", [("asfa", 1), ("htb", None)])
+def test_tracker_without_slots(key, value, caplog):
+    event = SlotSet(key, value)
+    tracker = DialogueStateTracker.from_dict("any", [])
+    assert key in tracker.slots
+    with caplog.at_level(logging.INFO):
+        event.apply_to(tracker)
+        v = tracker.get_slot(key)
+        assert v == value
+    assert len(caplog.records) == 0

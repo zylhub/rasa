@@ -1,18 +1,22 @@
-import argparse
-import asyncio
-import json
 import logging
 import os
-import typing
 import warnings
+import typing
 from collections import defaultdict, namedtuple
 from typing import Any, Dict, List, Optional, Text, Tuple
 
+from rasa.constants import RESULTS_FILE, PERCENTAGE_KEY
+from rasa.core.utils import pad_lists_to_size
 from rasa.core.events import ActionExecuted, UserUttered
+from rasa.nlu.training_data.formats.markdown import MarkdownWriter
+from rasa.core.trackers import DialogueStateTracker
 
 if typing.TYPE_CHECKING:
     from rasa.core.agent import Agent
-    from rasa.core.trackers import DialogueStateTracker
+
+import matplotlib
+
+matplotlib.use("TkAgg")
 
 logger = logging.getLogger(__name__)
 
@@ -20,35 +24,6 @@ StoryEvalution = namedtuple(
     "StoryEvaluation",
     "evaluation_store failed_stories action_list in_training_data_fraction",
 )
-
-
-def create_argument_parser():
-    """Create argument parser for the evaluate script."""
-    import rasa.core.cli.arguments
-
-    import rasa.core.cli.train
-    from rasa.core import cli
-
-    parser = argparse.ArgumentParser(description="evaluates a dialogue model")
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    cli.test.add_evaluation_arguments(parent_parser)
-    cli.arguments.add_model_and_story_group(parent_parser, allow_pretrained_model=False)
-    rasa.core.cli.arguments.add_logging_option_arguments(parent_parser)
-    subparsers = parser.add_subparsers(help="mode", dest="mode")
-    subparsers.add_parser(
-        "default",
-        help="default mode: evaluate a dialogue model",
-        parents=[parent_parser],
-    )
-    subparsers.add_parser(
-        "compare",
-        help="compare mode: evaluate multiple"
-        " dialogue models to compare "
-        "policies",
-        parents=[parent_parser],
-    )
-
-    return parser
 
 
 class EvaluationStore(object):
@@ -106,32 +81,28 @@ class EvaluationStore(object):
             or self.action_predictions != self.action_targets
         )
 
-    def serialise_targets(
-        self, include_actions=True, include_intents=True, include_entities=False
-    ):
-        targets = []
-        if include_actions:
-            targets += self.action_targets
-        if include_intents:
-            targets += self.intent_targets
-        if include_entities:
-            targets += self.entity_targets
+    def serialise(self) -> Tuple[List[Text], List[Text]]:
+        """Turn targets and predictions to lists of equal size for sklearn."""
 
-        return [json.dumps(t) if isinstance(t, dict) else t for t in targets]
+        targets = (
+            self.action_targets
+            + self.intent_targets
+            + [
+                MarkdownWriter._generate_entity_md(gold.get("text"), gold)
+                for gold in self.entity_targets
+            ]
+        )
+        predictions = (
+            self.action_predictions
+            + self.intent_predictions
+            + [
+                MarkdownWriter._generate_entity_md(predicted.get("text"), predicted)
+                for predicted in self.entity_predictions
+            ]
+        )
 
-    def serialise_predictions(
-        self, include_actions=True, include_intents=True, include_entities=False
-    ):
-        predictions = []
-
-        if include_actions:
-            predictions += self.action_predictions
-        if include_intents:
-            predictions += self.intent_predictions
-        if include_entities:
-            predictions += self.entity_predictions
-
-        return [json.dumps(t) if isinstance(t, dict) else t for t in predictions]
+        # sklearn does not cope with lists of unequal size, nor None values
+        return pad_lists_to_size(targets, predictions, padding_value="None")
 
 
 class WronglyPredictedAction(ActionExecuted):
@@ -174,24 +145,23 @@ class WronglyClassifiedUserUtterance(UserUttered):
 
     type_name = "wrong_utterance"
 
-    def __init__(
-        self,
-        text,
-        correct_intent,
-        correct_entities,
-        parse_data=None,
-        timestamp=None,
-        input_channel=None,
-        predicted_intent=None,
-        predicted_entities=None,
-    ):
-        self.predicted_intent = predicted_intent
-        self.predicted_entities = predicted_entities
+    def __init__(self, event: UserUttered, eval_store: EvaluationStore):
 
-        intent = {"name": correct_intent}
+        if not eval_store.intent_predictions:
+            self.predicted_intent = None
+        else:
+            self.predicted_intent = eval_store.intent_predictions[0]
+        self.predicted_entities = eval_store.entity_predictions
+
+        intent = {"name": eval_store.intent_targets[0]}
 
         super(WronglyClassifiedUserUtterance, self).__init__(
-            text, intent, correct_entities, parse_data, timestamp, input_channel
+            event.text,
+            intent,
+            eval_store.entity_targets,
+            event.parse_data,
+            event.timestamp,
+            event.input_channel,
         )
 
     def as_story_string(self, e2e=True):
@@ -201,7 +171,7 @@ class WronglyClassifiedUserUtterance(UserUttered):
         predicted_message = md_format_message(
             self.text, self.predicted_intent, self.predicted_entities
         )
-        return ("{}: {}   <!-- predicted: {}: {} -->").format(
+        return "{}: {}   <!-- predicted: {}: {} -->".format(
             self.intent.get("name"),
             correct_message,
             self.predicted_intent,
@@ -227,24 +197,35 @@ async def _generate_trackers(resource_name, agent, max_stories=None, use_e2e=Fal
     return g.generate()
 
 
-def _clean_entity_results(entity_results):
-    return [
-        {k: r[k] for k in ("start", "end", "entity", "value") if k in r}
-        for r in entity_results
-    ]
+def _clean_entity_results(
+    text: Text, entity_results: List[Dict[Text, Any]]
+) -> List[Dict[Text, Any]]:
+    """Extract only the token variables from an entity dict."""
+    cleaned_entities = []
+
+    for r in tuple(entity_results):
+        cleaned_entity = {"text": text}
+        for k in ("start", "end", "entity", "value"):
+            if k in set(r):
+                cleaned_entity[k] = r[k]
+        cleaned_entities.append(cleaned_entity)
+
+    return cleaned_entities
 
 
 def _collect_user_uttered_predictions(
-    event, partial_tracker, fail_on_prediction_errors
-):
-    from rasa.core.utils import pad_list_to_size
-
+    event: UserUttered,
+    partial_tracker: DialogueStateTracker,
+    fail_on_prediction_errors: bool,
+) -> EvaluationStore:
     user_uttered_eval_store = EvaluationStore()
 
     intent_gold = event.parse_data.get("true_intent")
-    predicted_intent = event.parse_data.get("intent").get("name")
-    if predicted_intent is None:
-        predicted_intent = "None"
+    predicted_intent = event.parse_data.get("intent", {}).get("name")
+
+    if not predicted_intent:
+        predicted_intent = [None]
+
     user_uttered_eval_store.add_to_store(
         intent_predictions=predicted_intent, intent_targets=intent_gold
     )
@@ -253,30 +234,14 @@ def _collect_user_uttered_predictions(
     predicted_entities = event.parse_data.get("entities")
 
     if entity_gold or predicted_entities:
-        if len(entity_gold) > len(predicted_entities):
-            predicted_entities = pad_list_to_size(
-                predicted_entities, len(entity_gold), "None"
-            )
-        elif len(predicted_entities) > len(entity_gold):
-            entity_gold = pad_list_to_size(entity_gold, len(predicted_entities), "None")
-
         user_uttered_eval_store.add_to_store(
-            entity_targets=_clean_entity_results(entity_gold),
-            entity_predictions=_clean_entity_results(predicted_entities),
+            entity_targets=_clean_entity_results(event.text, entity_gold),
+            entity_predictions=_clean_entity_results(event.text, predicted_entities),
         )
 
     if user_uttered_eval_store.has_prediction_target_mismatch():
         partial_tracker.update(
-            WronglyClassifiedUserUtterance(
-                event.text,
-                intent_gold,
-                user_uttered_eval_store.entity_predictions,
-                event.parse_data,
-                event.timestamp,
-                event.input_channel,
-                predicted_intent,
-                user_uttered_eval_store.entity_targets,
-            )
+            WronglyClassifiedUserUtterance(event, user_uttered_eval_store)
         )
         if fail_on_prediction_errors:
             raise ValueError(
@@ -406,7 +371,7 @@ def _in_training_data_fraction(action_list):
     """Given a list of action items, returns the fraction of actions
 
     that were predicted using one of the Memoization policies."""
-    from rasa.core.policies import SimplePolicyEnsemble
+    from rasa.core.policies.ensemble import SimplePolicyEnsemble
 
     in_training_data = [
         a["action"]
@@ -430,9 +395,9 @@ def collect_story_predictions(
     story_eval_store = EvaluationStore()
     failed = []
     correct_dialogues = []
-    num_stories = len(completed_trackers)
+    number_of_stories = len(completed_trackers)
 
-    logger.info("Evaluating {} stories\nProgress:".format(num_stories))
+    logger.info("Evaluating {} stories\nProgress:".format(number_of_stories))
 
     action_list = []
 
@@ -481,7 +446,7 @@ def collect_story_predictions(
             action_list=action_list,
             in_training_data_fraction=in_training_data_fraction,
         ),
-        num_stories,
+        number_of_stories,
     )
 
 
@@ -506,15 +471,15 @@ async def test(
     max_stories: Optional[int] = None,
     out_directory: Optional[Text] = None,
     fail_on_prediction_errors: bool = False,
-    use_e2e: bool = False,
+    e2e: bool = False,
 ):
     """Run the evaluation of the stories, optionally plot the results."""
     from rasa.nlu.test import get_evaluation_metrics
 
-    completed_trackers = await _generate_trackers(stories, agent, max_stories, use_e2e)
+    completed_trackers = await _generate_trackers(stories, agent, max_stories, e2e)
 
     story_evaluation, _ = collect_story_predictions(
-        completed_trackers, agent, fail_on_prediction_errors, use_e2e
+        completed_trackers, agent, fail_on_prediction_errors, e2e
     )
 
     evaluation_store = story_evaluation.evaluation_store
@@ -523,10 +488,9 @@ async def test(
         from sklearn.exceptions import UndefinedMetricWarning
 
         warnings.simplefilter("ignore", UndefinedMetricWarning)
-        report, precision, f1, accuracy = get_evaluation_metrics(
-            evaluation_store.serialise_targets(),
-            evaluation_store.serialise_predictions(),
-        )
+
+        targets, predictions = evaluation_store.serialise()
+        report, precision, f1, accuracy = get_evaluation_metrics(targets, predictions)
 
     if out_directory:
         plot_story_evaluation(
@@ -549,7 +513,7 @@ async def test(
         "accuracy": accuracy,
         "actions": story_evaluation.action_list,
         "in_training_data_fraction": story_evaluation.in_training_data_fraction,
-        "is_end_to_end_evaluation": use_e2e,
+        "is_end_to_end_evaluation": e2e,
     }
 
 
@@ -617,58 +581,114 @@ def plot_story_evaluation(
     fig.savefig(os.path.join(out_directory, "story_confmat.pdf"), bbox_inches="tight")
 
 
-async def compare(models: Text, stories_file: Text, output: Text) -> None:
-    """Evaluates multiple trained models on a test set."""
-    from rasa.core.agent import Agent
-    import rasa.nlu.utils as nlu_utils
+async def compare_models_in_dir(
+    model_dir: Text, stories_file: Text, output: Text
+) -> None:
+    """Evaluates multiple trained models in a directory on a test set."""
+    from rasa.core import utils
+    import rasa.utils.io as io_utils
+
+    number_correct = defaultdict(list)
+
+    for run in io_utils.list_subdirectories(model_dir):
+        number_correct_in_run = defaultdict(list)
+
+        for model in sorted(io_utils.list_files(run)):
+            if not model.endswith("tar.gz"):
+                continue
+
+            # The model files are named like <config-name>PERCENTAGE_KEY<number>.tar.gz
+            # Remove the percentage key and number from the name to get the config name
+            config_name = os.path.basename(model).split(PERCENTAGE_KEY)[0]
+            number_of_correct_stories = await _evaluate_core_model(model, stories_file)
+            number_correct_in_run[config_name].append(number_of_correct_stories)
+
+        for k, v in number_correct_in_run.items():
+            number_correct[k].append(v)
+
+    utils.dump_obj_as_json_to_file(os.path.join(output, RESULTS_FILE), number_correct)
+
+
+async def compare_models(models: List[Text], stories_file: Text, output: Text) -> None:
+    """Evaluates provided trained models on a test set."""
     from rasa.core import utils
 
-    num_correct = defaultdict(list)
+    number_correct = defaultdict(list)
 
-    for run in nlu_utils.list_subdirectories(models):
-        num_correct_run = defaultdict(list)
+    for model in models:
+        number_of_correct_stories = await _evaluate_core_model(model, stories_file)
+        number_correct[os.path.basename(model)].append(number_of_correct_stories)
 
-        for model in sorted(nlu_utils.list_subdirectories(run)):
-            logger.info("Evaluating model {}".format(model))
-
-            agent = Agent.load(model)
-
-            completed_trackers = await _generate_trackers(stories_file, agent)
-
-            story_eval_store, no_of_stories = collect_story_predictions(
-                completed_trackers, agent
-            )
-
-            failed_stories = story_eval_store.failed_stories
-            policy_name = "".join(
-                [i for i in os.path.basename(model) if not i.isdigit()]
-            )
-            num_correct_run[policy_name].append(no_of_stories - len(failed_stories))
-
-        for k, v in num_correct_run.items():
-            num_correct[k].append(v)
-
-    utils.dump_obj_as_json_to_file(os.path.join(output, "results.json"), num_correct)
+    utils.dump_obj_as_json_to_file(os.path.join(output, RESULTS_FILE), number_correct)
 
 
-def plot_curve(output: Text, no_stories: List[int]) -> None:
-    """Plot the results from run_comparison_evaluation.
+async def _evaluate_core_model(model: Text, stories_file: Text) -> int:
+    from rasa.core.agent import Agent
+
+    logger.info("Evaluating model '{}'".format(model))
+
+    agent = Agent.load(model)
+    completed_trackers = await _generate_trackers(stories_file, agent)
+    story_eval_store, number_of_stories = collect_story_predictions(
+        completed_trackers, agent
+    )
+    failed_stories = story_eval_store.failed_stories
+    return number_of_stories - len(failed_stories)
+
+
+def plot_nlu_results(output: Text, number_of_examples: List[int]) -> None:
+
+    graph_path = os.path.join(output, "nlu_model_comparison_graph.pdf")
+
+    _plot_curve(
+        output,
+        number_of_examples,
+        x_label_text="Number of intent examples present during training",
+        y_label_text="Label-weighted average F1 score on test set",
+        graph_path=graph_path,
+    )
+
+
+def plot_core_results(output: Text, number_of_examples: List[int]) -> None:
+
+    graph_path = os.path.join(output, "core_model_comparison_graph.pdf")
+
+    _plot_curve(
+        output,
+        number_of_examples,
+        x_label_text="Number of stories present during training",
+        y_label_text="Number of correct test stories",
+        graph_path=graph_path,
+    )
+
+
+def _plot_curve(
+    output: Text,
+    number_of_examples: List[int],
+    x_label_text: Text,
+    y_label_text: Text,
+    graph_path: Text,
+) -> None:
+    """Plot the results from a model comparison.
 
     Args:
         output: Output directory to save resulting plots to
-        no_stories: Number of stories per run
+        number_of_examples: Number of examples per run
+        x_label_text: text for the x axis
+        y_label_text: text for the y axis
+        graph_path: output path of the plot
     """
     import matplotlib.pyplot as plt
     import numpy as np
-    from rasa.core import utils
+    import rasa.utils.io
 
     ax = plt.gca()
 
     # load results from file
-    data = utils.read_json_file(os.path.join(output, "results.json"))
-    x = no_stories
+    data = rasa.utils.io.read_json_file(os.path.join(output, RESULTS_FILE))
+    x = number_of_examples
 
-    # compute mean of all the runs for keras/embed policies
+    # compute mean of all the runs for different configs
     for label in data.keys():
         if len(data[label]) == 0:
             continue
@@ -683,76 +703,18 @@ def plot_curve(output: Text, no_stories: List[int]) -> None:
             alpha=0.2,
         )
     ax.legend(loc=4)
-    ax.set_xlabel("Number of stories present during training")
-    ax.set_ylabel("Number of correct test stories")
-    plt.savefig(os.path.join(output, "model_comparison_graph.pdf"), format="pdf")
-    plt.show()
 
+    ax.set_xlabel(x_label_text)
+    ax.set_ylabel(y_label_text)
 
-def main():
-    from rasa.core.agent import Agent
-    from rasa.core.interpreter import NaturalLanguageInterpreter
-    from rasa.core.utils import AvailableEndpoints, set_default_subparser
-    import rasa.nlu.utils as nlu_utils
-    import rasa.core.cli
-    from rasa.core import utils
+    plt.savefig(graph_path, format="pdf")
 
-    loop = asyncio.get_event_loop()
-
-    # Running as standalone python application
-    arg_parser = create_argument_parser()
-    set_default_subparser(arg_parser, "default")
-    cmdline_arguments = arg_parser.parse_args()
-
-    logging.basicConfig(level=cmdline_arguments.loglevel)
-    _endpoints = AvailableEndpoints.read_endpoints(cmdline_arguments.endpoints)
-
-    if cmdline_arguments.output:
-        nlu_utils.create_dir(cmdline_arguments.output)
-
-    if not cmdline_arguments.core:
-        raise ValueError(
-            "you must provide a core model directory to evaluate using -d / --core"
-        )
-    if cmdline_arguments.mode == "default":
-
-        _interpreter = NaturalLanguageInterpreter.create(
-            cmdline_arguments.nlu, _endpoints.nlu
-        )
-
-        _agent = Agent.load(cmdline_arguments.core, interpreter=_interpreter)
-
-        stories = loop.run_until_complete(
-            rasa.core.cli.train.stories_from_cli_args(cmdline_arguments)
-        )
-
-        loop.run_until_complete(
-            test(
-                stories,
-                _agent,
-                cmdline_arguments.max_stories,
-                cmdline_arguments.output,
-                cmdline_arguments.fail_on_prediction_errors,
-                cmdline_arguments.e2e,
-            )
-        )
-
-    elif cmdline_arguments.mode == "compare":
-        compare(
-            cmdline_arguments.core, cmdline_arguments.stories, cmdline_arguments.output
-        )
-
-        story_n_path = os.path.join(cmdline_arguments.core, "num_stories.json")
-
-        number_of_stories = utils.read_json_file(story_n_path)
-        plot_curve(cmdline_arguments.output, number_of_stories)
-
-    logger.info("Finished evaluation")
+    logger.info("Comparison graph saved to '{}'.".format(graph_path))
 
 
 if __name__ == "__main__":
     raise RuntimeError(
-        "Calling `rasa.core.test` directly is "
-        "no longer supported. "
-        "Please use `rasa test core` instead."
+        "Calling `rasa.core.test` directly is no longer supported. Please use "
+        "`rasa test` to test a combined Core and NLU model or `rasa test core` "
+        "to test a Core model."
     )

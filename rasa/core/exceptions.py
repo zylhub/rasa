@@ -1,4 +1,7 @@
-class RasaCoreException(Exception):
+from rasa.exceptions import RasaException
+
+
+class RasaCoreException(RasaException):
     """Basic exception for errors raised by Rasa Core."""
 
 
@@ -10,7 +13,7 @@ class StoryParseError(RasaCoreException, ValueError):
 
 
 class UnsupportedDialogueModelError(RasaCoreException):
-    """Raised when a model is to old to be loaded.
+    """Raised when a model is too old to be loaded.
 
     Attributes:
         message -- explanation of why the model is invalid

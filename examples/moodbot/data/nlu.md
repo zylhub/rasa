@@ -26,14 +26,14 @@
 - bye bye
 - see you later
 
-## intent:mood_affirm
+## intent:affirm
 - yes
 - indeed
 - of course
 - that sounds good
 - correct
 
-## intent:mood_deny
+## intent:deny
 - no
 - never
 - I don't think so
@@ -72,3 +72,9 @@
 - extremly sad
 - so saad
 - so sad
+
+## intent:bot_challenge
+- are you a bot?
+- are you a human?
+- am I talking to a bot?
+- am I talking to a human?

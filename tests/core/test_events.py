@@ -1,3 +1,5 @@
+import time
+
 import pytz
 from datetime import datetime
 import copy
@@ -41,8 +43,8 @@ from rasa.core.events import (
         (ActionExecuted("my_action"), ActionExecuted("my_other_action")),
         (FollowupAction("my_action"), FollowupAction("my_other_action")),
         (
-            BotUttered("my_text", "my_data"),
-            BotUttered("my_other_test", "my_other_data"),
+            BotUttered("my_text", {"my_data": 1}),
+            BotUttered("my_other_test", {"my_other_data": 1}),
         ),
         (
             AgentUttered("my_text", "my_data"),
@@ -78,6 +80,9 @@ def test_event_has_proper_implementation(one_event, another_event):
     "one_event",
     [
         UserUttered("/greet", {"name": "greet", "confidence": 1.0}, []),
+        UserUttered(metadata={"type": "text"}),
+        UserUttered(metadata=None),
+        UserUttered(text="hi", message_id="1", metadata={"type": "text"}),
         SlotSet("name", "rasa"),
         Restarted(),
         AllSlotsReset(),
@@ -89,7 +94,7 @@ def test_event_has_proper_implementation(one_event, another_event):
         ActionExecuted("my_action"),
         ActionExecuted("my_action", "policy_1_KerasPolicy", 0.8),
         FollowupAction("my_action"),
-        BotUttered("my_text", "my_data"),
+        BotUttered("my_text", {"my_data": 1}),
         AgentUttered("my_text", "my_data"),
         ReminderScheduled("my_action", datetime.now()),
         ReminderScheduled("my_action", datetime.now(pytz.timezone("US/Central"))),
@@ -123,18 +128,28 @@ def test_json_parse_reset():
 
 
 def test_json_parse_user():
+    # fmt: off
     # DOCS MARKER UserUttered
-    evt = {
-        "event": "user",
-        "text": "Hey",
-        "parse_data": {"intent": {"name": "greet", "confidence": 0.9}, "entities": []},
-    }
+    evt={
+          "event": "user",
+          "text": "Hey",
+          "parse_data": {
+            "intent": {
+              "name": "greet",
+              "confidence": 0.9
+            },
+            "entities": []
+          },
+          "metadata": {},
+        }
     # DOCS END
+    # fmt: on
     assert Event.from_parameters(evt) == UserUttered(
         "Hey",
         intent={"name": "greet", "confidence": 0.9},
         entities=[],
         parse_data={"intent": {"name": "greet", "confidence": 0.9}, "entities": []},
+        metadata={},
     )
 
 
@@ -153,15 +168,17 @@ def test_json_parse_rewind():
 
 
 def test_json_parse_reminder():
+    # fmt: off
     # DOCS MARKER ReminderScheduled
-    evt = {
-        "event": "reminder",
-        "action": "my_action",
-        "date_time": "2018-09-03T11:41:10.128172",
-        "name": "my_reminder",
-        "kill_on_user_msg": True,
-    }
+    evt={
+          "event": "reminder",
+          "action": "my_action",
+          "date_time": "2018-09-03T11:41:10.128172",
+          "name": "my_reminder",
+          "kill_on_user_msg": True,
+        }
     # DOCS END
+    # fmt: on
     assert Event.from_parameters(evt) == ReminderScheduled(
         "my_action",
         parser.parse("2018-09-03T11:41:10.128172"),
@@ -217,3 +234,36 @@ def test_json_parse_agent():
     evt = {"event": "agent", "text": "Hey, how are you?"}
     # DOCS END
     assert Event.from_parameters(evt) == AgentUttered("Hey, how are you?")
+
+
+@pytest.mark.parametrize(
+    "event_class",
+    [
+        UserUttered,
+        BotUttered,
+        ActionReverted,
+        Event,
+        Restarted,
+        AllSlotsReset,
+        ConversationResumed,
+        ConversationPaused,
+        StoryExported,
+        UserUtteranceReverted,
+        AgentUttered,
+    ],
+)
+def test_correct_timestamp_setting_for_events_with_no_required_params(event_class):
+    event = event_class()
+    time.sleep(0.01)
+    event2 = event_class()
+
+    assert event.timestamp < event2.timestamp
+
+
+@pytest.mark.parametrize("event_class", [SlotSet, ActionExecuted, FollowupAction])
+def test_correct_timestamp_setting(event_class):
+    event = event_class("test")
+    time.sleep(0.01)
+    event2 = event_class("test")
+
+    assert event.timestamp < event2.timestamp

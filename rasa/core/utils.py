@@ -1,19 +1,15 @@
 # -*- coding: utf-8 -*-
 import argparse
-import asyncio
-import errno
 import json
 import logging
 import os
 import re
 import sys
-import tarfile
-import tempfile
-import warnings
-import zipfile
-from asyncio import AbstractEventLoop, Future
+from asyncio import Future
+from decimal import Decimal
 from hashlib import md5, sha1
-from io import BytesIO as IOReader, StringIO
+from io import StringIO
+from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -24,18 +20,21 @@ from typing import (
     Text,
     Tuple,
     Callable,
-    Awaitable,
+    Union,
 )
 
 import aiohttp
 from aiohttp import InvalidURL
-from requests.exceptions import InvalidURL
 from sanic import Sanic
-from sanic.request import Request
 from sanic.views import CompositionView
 
-import rasa.utils.endpoints
-from rasa.utils.endpoints import read_endpoint_config
+import rasa.utils.io as io_utils
+from rasa.constants import ENV_SANIC_WORKERS, DEFAULT_SANIC_WORKERS
+
+# backwards compatibility 1.0.x
+# noinspection PyUnresolvedReferences
+from rasa.core.lock_store import LockStore, RedisLockStore
+from rasa.utils.endpoints import EndpointConfig, read_endpoint_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,40 +42,15 @@ if TYPE_CHECKING:
     from random import Random
 
 
-def configure_file_logging(loglevel, logfile):
-    if logfile:
-        fh = logging.FileHandler(logfile, encoding="utf-8")
-        fh.setLevel(loglevel)
-        logging.getLogger("").addHandler(fh)
-    logging.captureWarnings(True)
+def configure_file_logging(logger_obj: logging.Logger, log_file: Optional[Text]):
+    if not log_file:
+        return
 
-
-# noinspection PyUnresolvedReferences
-def class_from_module_path(
-    module_path: Text, lookup_path: Optional[Text] = None
-) -> Any:
-    """Given the module name and path of a class, tries to retrieve the class.
-
-    The loaded class can be used to instantiate new objects. """
-    import importlib
-
-    # load the module, will raise ImportError if module cannot be loaded
-    if "." in module_path:
-        module_name, _, class_name = module_path.rpartition(".")
-        m = importlib.import_module(module_name)
-        # get the class, will raise AttributeError if class cannot be found
-        return getattr(m, class_name)
-    else:
-        module = globals().get(module_path, locals().get(module_path))
-        if module is not None:
-            return module
-
-        if lookup_path:
-            # last resort: try to import the class from the lookup path
-            m = importlib.import_module(lookup_path)
-            return getattr(m, module_path)
-        else:
-            raise ImportError("Cannot retrieve class from path {}.".format(module_path))
+    formatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logger_obj.level)
+    file_handler.setFormatter(formatter)
+    logger_obj.addHandler(file_handler)
 
 
 def module_path_from_instance(inst: Any) -> Text:
@@ -126,35 +100,6 @@ def is_int(value: Any) -> bool:
         return value == int(value)
     except Exception:
         return False
-
-
-def lazyproperty(fn):
-    """Allows to avoid recomputing a property over and over.
-
-    Instead the result gets stored in a local var. Computation of the property
-    will happen once, on the first call of the property. All succeeding calls
-    will use the value stored in the private property."""
-
-    attr_name = "_lazy_" + fn.__name__
-
-    @property
-    def _lazyprop(self):
-        if not hasattr(self, attr_name):
-            setattr(self, attr_name, fn(self))
-        return getattr(self, attr_name)
-
-    return _lazyprop
-
-
-def create_dir_for_file(file_path: Text) -> None:
-    """Creates any missing parent directories of this files path."""
-
-    try:
-        os.makedirs(os.path.dirname(file_path))
-    except OSError as e:
-        # be happy if someone already created the path
-        if e.errno != errno.EEXIST:
-            raise
 
 
 def one_hot(hot_idx, length, dtype=None):
@@ -270,23 +215,17 @@ def _dump_yaml(obj, output):
     yaml_writer.dump(obj, output)
 
 
-def dump_obj_as_yaml_to_file(filename, obj):
+def dump_obj_as_yaml_to_file(filename: Union[Text, Path], obj: Dict) -> None:
     """Writes data (python dict) to the filename in yaml repr."""
-    with open(filename, "w", encoding="utf-8") as output:
+    with open(str(filename), "w", encoding="utf-8") as output:
         _dump_yaml(obj, output)
 
 
-def dump_obj_as_yaml_to_string(obj):
+def dump_obj_as_yaml_to_string(obj: Dict) -> Text:
     """Writes data (python dict) to a yaml string."""
     str_io = StringIO()
     _dump_yaml(obj, str_io)
     return str_io.getvalue()
-
-
-def read_json_file(filename):
-    """Read json from a file"""
-    with open(filename) as f:
-        return json.load(f)
 
 
 def list_routes(app: Sanic):
@@ -299,7 +238,7 @@ def list_routes(app: Sanic):
 
     def find_route(suffix, path):
         for name, (uri, _) in app.router.routes_names.items():
-            if name.endswith(suffix) and uri == path:
+            if name.split(".")[-1] == suffix and uri == path:
                 return name
         return None
 
@@ -329,38 +268,10 @@ def list_routes(app: Sanic):
     return output
 
 
-def zip_folder(folder):
-    """Create an archive from a folder."""
-    import shutil
-
-    zipped_path = tempfile.NamedTemporaryFile(delete=False)
-    zipped_path.close()
-
-    # WARN: not thread save!
-    return shutil.make_archive(zipped_path.name, str("zip"), folder)
-
-
-def unarchive(byte_array: bytes, directory: Text) -> Text:
-    """Tries to unpack a byte array interpreting it as an archive.
-
-    Tries to use tar first to unpack, if that fails, zip will be used."""
-
-    try:
-        tar = tarfile.open(fileobj=IOReader(byte_array))
-        tar.extractall(directory)
-        tar.close()
-        return directory
-    except tarfile.TarError:
-        zip_ref = zipfile.ZipFile(IOReader(byte_array))
-        zip_ref.extractall(directory)
-        zip_ref.close()
-        return directory
-
-
 def cap_length(s, char_limit=20, append_ellipsis=True):
     """Makes sure the string doesn't exceed the passed char limit.
 
-    Appends an ellipsis if the string is to long."""
+    Appends an ellipsis if the string is too long."""
 
     if len(s) > char_limit:
         if append_ellipsis:
@@ -369,42 +280,6 @@ def cap_length(s, char_limit=20, append_ellipsis=True):
             return s[:char_limit]
     else:
         return s
-
-
-def write_request_body_to_file(request: Request, path: Text):
-    """Writes the body of `request` to `path`."""
-
-    with open(path, "w+b") as f:
-        f.write(request.body)
-
-
-def bool_arg(request: Request, name: Text, default: bool = True) -> bool:
-    """Return a passed boolean argument of the request or a default.
-
-    Checks the `name` parameter of the request if it contains a valid
-    boolean value. If not, `default` is returned."""
-
-    return request.args.get(name, str(default)).lower() == "true"
-
-
-def float_arg(
-    request: Request, key: Text, default: Optional[float] = None
-) -> Optional[float]:
-    """Return a passed argument cast as a float or None.
-
-    Checks the `name` parameter of the request if it contains a valid
-    float value. If not, `None` is returned."""
-
-    arg = request.args.get(key, default)
-
-    if arg is default:
-        return arg
-
-    try:
-        return float(str(arg))
-    except (ValueError, TypeError):
-        logger.warning("Failed to convert '{}' to float.".format(arg))
-        return default
 
 
 def extract_args(
@@ -423,25 +298,6 @@ def extract_args(
             remaining[k] = v
 
     return extracted, remaining
-
-
-def concat_url(base: Text, subpath: Optional[Text]) -> Text:
-    """Append a subpath to a base url.
-
-    Strips leading slashes from the subpath if necessary. This behaves
-    differently than `urlparse.urljoin` and will not treat the subpath
-    as a base url if it starts with `/` but will always append it to the
-    `base`."""
-
-    if subpath:
-        url = base
-        if not base.endswith("/"):
-            url += "/"
-        if subpath.startswith("/"):
-            subpath = subpath[1:]
-        return url + subpath
-    else:
-        return base
 
 
 def all_subclasses(cls: Any) -> List[Any]:
@@ -479,14 +335,28 @@ def file_as_bytes(path: Text) -> bytes:
         return f.read()
 
 
+def convert_bytes_to_string(data: Union[bytes, bytearray, Text]) -> Text:
+    """Convert `data` to string if it is a bytes-like object."""
+
+    if isinstance(data, (bytes, bytearray)):
+        return data.decode("utf-8")
+
+    return data
+
+
 def get_file_hash(path: Text) -> Text:
     """Calculate the md5 hash of a file."""
     return md5(file_as_bytes(path)).hexdigest()
 
 
 def get_text_hash(text: Text, encoding: Text = "utf-8") -> Text:
-    """Calculate the md5 hash of a file."""
+    """Calculate the md5 hash for a text."""
     return md5(text.encode(encoding)).hexdigest()
+
+
+def get_dict_hash(data: Dict, encoding: Text = "utf-8") -> Text:
+    """Calculate the md5 hash of a dictionary."""
+    return md5(json.dumps(data, sort_keys=True).encode(encoding)).hexdigest()
 
 
 async def download_file_from_url(url: Text) -> Text:
@@ -501,7 +371,7 @@ async def download_file_from_url(url: Text) -> Text:
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, raise_for_status=True) as resp:
-            filename = nlu_utils.create_temporary_file(await resp.read(), mode="w+b")
+            filename = io_utils.create_temporary_file(await resp.read(), mode="w+b")
 
     return filename
 
@@ -511,9 +381,19 @@ def remove_none_values(obj: Dict[Text, Any]) -> Dict[Text, Any]:
     return {k: v for k, v in obj.items() if v is not None}
 
 
-def pad_list_to_size(_list, size, padding_value=None):
-    """Pads _list with padding_value up to size"""
-    return _list + [padding_value] * (size - len(_list))
+def pad_lists_to_size(
+    list_x: List, list_y: List, padding_value: Optional[Any] = None
+) -> Tuple[List, List]:
+    """Compares list sizes and pads them to equal length."""
+
+    difference = len(list_x) - len(list_y)
+
+    if difference > 0:
+        return list_x, list_y + [padding_value] * difference
+    elif difference < 0:
+        return list_x + [padding_value] * (-difference), list_y
+    else:
+        return list_x, list_y
 
 
 class AvailableEndpoints(object):
@@ -528,9 +408,10 @@ class AvailableEndpoints(object):
         tracker_store = read_endpoint_config(
             endpoint_file, endpoint_type="tracker_store"
         )
+        lock_store = read_endpoint_config(endpoint_file, endpoint_type="lock_store")
         event_broker = read_endpoint_config(endpoint_file, endpoint_type="event_broker")
 
-        return cls(nlg, nlu, action, model, tracker_store, event_broker)
+        return cls(nlg, nlu, action, model, tracker_store, lock_store, event_broker)
 
     def __init__(
         self,
@@ -539,6 +420,7 @@ class AvailableEndpoints(object):
         action=None,
         model=None,
         tracker_store=None,
+        lock_store=None,
         event_broker=None,
     ):
         self.model = model
@@ -546,6 +428,7 @@ class AvailableEndpoints(object):
         self.nlu = nlu
         self.nlg = nlg
         self.tracker_store = tracker_store
+        self.lock_store = lock_store
         self.event_broker = event_broker
 
 
@@ -589,27 +472,82 @@ def create_task_error_logger(error_message: Text = "") -> Callable[[Future], Non
     return handler
 
 
-class LockCounter(asyncio.Lock):
-    """Decorated asyncio lock that counts how many coroutines are waiting.
+def replace_floats_with_decimals(obj: Union[List, Dict]) -> Any:
+    """
+    Utility method to recursively walk a dictionary or list converting all `float` to `Decimal` as required by DynamoDb.
 
-    The counter can be used to discard the lock when there is no coroutine
-    waiting for it. For this to work, there should not be any execution yield
-    between retrieving the lock and acquiring it, otherwise there might be
-    race conditions."""
+    Args:
+        obj: A `List` or `Dict` object.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.wait_counter = 0
+    Returns: An object with all matching values and `float` type replaced by `Decimal`.
 
-    async def acquire(self) -> bool:
-        """Acquire the lock, makes sure only one coroutine can retrieve it."""
+    """
+    if isinstance(obj, list):
+        for i in range(len(obj)):
+            obj[i] = replace_floats_with_decimals(obj[i])
+        return obj
+    elif isinstance(obj, dict):
+        for j in obj:
+            obj[j] = replace_floats_with_decimals(obj[j])
+        return obj
+    elif isinstance(obj, float):
+        return Decimal(obj)
+    else:
+        return obj
 
-        self.wait_counter += 1
-        try:
-            return await super(LockCounter, self).acquire()  # type: ignore
-        finally:
-            self.wait_counter -= 1
 
-    def is_someone_waiting(self) -> bool:
-        """Check if a coroutine is waiting for this lock to be freed."""
-        return self.wait_counter != 0
+def _lock_store_is_redis_lock_store(
+    lock_store: Union[EndpointConfig, LockStore, None]
+) -> bool:
+    # determine whether `lock_store` is associated with a `RedisLockStore`
+    if isinstance(lock_store, LockStore):
+        if isinstance(lock_store, RedisLockStore):
+            return True
+        return False
+
+    # `lock_store` is `None` or `EndpointConfig`
+    return lock_store is not None and lock_store.type == "redis"
+
+
+def number_of_sanic_workers(lock_store: Union[EndpointConfig, LockStore, None]) -> int:
+    """Get the number of Sanic workers to use in `app.run()`.
+
+    If the environment variable constants.ENV_SANIC_WORKERS is set and is not equal to
+    1, that value will only be permitted if the used lock store supports shared
+    resources across multiple workers (e.g. ``RedisLockStore``).
+    """
+
+    def _log_and_get_default_number_of_workers():
+        logger.debug(
+            f"Using the default number of Sanic workers ({DEFAULT_SANIC_WORKERS})."
+        )
+        return DEFAULT_SANIC_WORKERS
+
+    try:
+        env_value = int(os.environ.get(ENV_SANIC_WORKERS, DEFAULT_SANIC_WORKERS))
+    except ValueError:
+        logger.error(
+            f"Cannot convert environment variable `{ENV_SANIC_WORKERS}` "
+            f"to int ('{os.environ[ENV_SANIC_WORKERS]}')."
+        )
+        return _log_and_get_default_number_of_workers()
+
+    if env_value == DEFAULT_SANIC_WORKERS:
+        return _log_and_get_default_number_of_workers()
+
+    if env_value < 1:
+        logger.debug(
+            f"Cannot set number of Sanic workers to the desired value "
+            f"({env_value}). The number of workers must be at least 1."
+        )
+        return _log_and_get_default_number_of_workers()
+
+    if _lock_store_is_redis_lock_store(lock_store):
+        logger.debug(f"Using {env_value} Sanic workers.")
+        return env_value
+
+    logger.debug(
+        f"Unable to assign desired number of Sanic workers ({env_value}) as "
+        f"no `RedisLockStore` endpoint configuration has been found."
+    )
+    return _log_and_get_default_number_of_workers()

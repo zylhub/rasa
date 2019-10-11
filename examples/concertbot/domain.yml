@@ -11,19 +11,22 @@ intents:
  - search_concerts
  - search_venues
  - compare_reviews
+ - bot_challenge
 
 entities:
  - name
 
 templates:
   utter_greet:
-    - "hey there!"
+    - text: "hey there!"
   utter_goodbye:
-    - "goodbye :("
+    - text: "goodbye :("
   utter_default:
-    - "default message"
+    - text: "default message"
   utter_youarewelcome:
-    - "you're very welcome"
+    - text: "you're very welcome"
+  utter_iamabot:
+    - text: "I am a bot, powered by Rasa."
 
 actions:
   - utter_default
@@ -34,3 +37,4 @@ actions:
   - action_search_venues
   - action_show_concert_reviews
   - action_show_venue_reviews
+  - utter_iamabot

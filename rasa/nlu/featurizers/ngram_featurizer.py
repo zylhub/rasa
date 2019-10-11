@@ -13,6 +13,13 @@ from rasa.nlu import utils
 from rasa.nlu.config import RasaNLUModelConfig
 from rasa.nlu.featurizers import Featurizer
 from rasa.nlu.training_data import Message, TrainingData
+from rasa.nlu.utils import write_json_to_file
+import rasa.utils.io
+from rasa.nlu.constants import (
+    MESSAGE_SPACY_FEATURES_NAMES,
+    MESSAGE_TEXT_ATTRIBUTE,
+    MESSAGE_VECTOR_FEATURE_NAMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +29,9 @@ if typing.TYPE_CHECKING:
 
 class NGramFeaturizer(Featurizer):
 
-    provides = ["text_features"]
+    provides = [MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE]]
 
-    requires = ["spacy_doc"]
+    requires = [MESSAGE_SPACY_FEATURES_NAMES[MESSAGE_TEXT_ATTRIBUTE]]
 
     defaults = {
         # defines the maximum number of ngrams to collect and add
@@ -43,15 +50,20 @@ class NGramFeaturizer(Featurizer):
         "min_intent_examples": 4,
     }
 
-    def __init__(self, component_config=None):
+    def __init__(
+        self,
+        component_config: Optional[Dict[Text, Any]] = None,
+        all_ngrams: Optional[List[Text]] = None,
+        best_num_ngrams: Optional[int] = None,
+    ):
         super(NGramFeaturizer, self).__init__(component_config)
 
-        self.best_num_ngrams = None
-        self.all_ngrams = None
+        self.best_num_ngrams = best_num_ngrams
+        self.all_ngrams = all_ngrams
 
     @classmethod
     def required_packages(cls) -> List[Text]:
-        return ["spacy", "sklearn", "cloudpickle"]
+        return ["spacy", "sklearn"]
 
     def train(
         self, training_data: TrainingData, cfg: RasaNLUModelConfig, **kwargs: Any
@@ -63,12 +75,12 @@ class NGramFeaturizer(Featurizer):
 
         for example in training_data.training_examples:
             updated = self._text_features_with_ngrams(example, self.best_num_ngrams)
-            example.set("text_features", updated)
+            example.set(MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE], updated)
 
     def process(self, message: Message, **kwargs: Any):
 
         updated = self._text_features_with_ngrams(message, self.best_num_ngrams)
-        message.set("text_features", updated)
+        message.set(MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE], updated)
 
     def _text_features_with_ngrams(self, message, max_ngrams):
 
@@ -76,9 +88,9 @@ class NGramFeaturizer(Featurizer):
 
         if ngrams_to_use is not None:
             extras = np.array(self._ngrams_in_sentence(message, ngrams_to_use))
-            return self._combine_with_existing_text_features(message, extras)
+            return self._combine_with_existing_features(message, extras)
         else:
-            return message.get("text_features")
+            return message.get(MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE])
 
     @classmethod
     def load(
@@ -94,16 +106,20 @@ class NGramFeaturizer(Featurizer):
         featurizer_file = os.path.join(model_dir, file_name)
 
         if os.path.exists(featurizer_file):
-            return utils.pycloud_unpickle(featurizer_file)
+            data = rasa.utils.io.read_json_file(featurizer_file)
+            return NGramFeaturizer(meta, data["all_ngrams"], data["best_num_ngrams"])
         else:
             return NGramFeaturizer(meta)
 
     def persist(self, file_name: Text, model_dir: Text) -> Optional[Dict[Text, Any]]:
         """Persist this model into the passed directory."""
 
-        file_name = file_name + ".pkl"
+        file_name = file_name + ".json"
         featurizer_file = os.path.join(model_dir, file_name)
-        utils.pycloud_pickle(featurizer_file, self)
+        data = {"all_ngrams": self.all_ngrams, "best_num_ngrams": self.best_num_ngrams}
+
+        write_json_to_file(featurizer_file, data, separators=(",", ": "))
+
         return {"file": file_name}
 
     def train_on_sentences(self, examples):
@@ -155,7 +171,11 @@ class NGramFeaturizer(Featurizer):
         """Filter for words that do not have a word vector."""
 
         cleaned_tokens = [
-            token for token in example.get("spacy_doc") if self._is_ngram_worthy(token)
+            token
+            for token in example.get(
+                MESSAGE_SPACY_FEATURES_NAMES[MESSAGE_TEXT_ATTRIBUTE]
+            )
+            if self._is_ngram_worthy(token)
         ]
 
         # keep only out-of-vocab 'non_word' words
@@ -305,9 +325,10 @@ class NGramFeaturizer(Featurizer):
     def _collect_features(examples):
         if examples:
             collected_features = [
-                e.get("text_features")
+                e.get(MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE])
                 for e in examples
-                if e.get("text_features") is not None
+                if e.get(MESSAGE_VECTOR_FEATURE_NAMES[MESSAGE_TEXT_ATTRIBUTE])
+                is not None
             ]
         else:
             collected_features = []
@@ -364,7 +385,7 @@ class NGramFeaturizer(Featurizer):
         possible_ngrams = np.linspace(0, max_ngrams, 8)
         return np.unique(list(map(int, np.floor(possible_ngrams))))
 
-    def _cross_validation(self, examples, labels):
+    def _cross_validation(self, examples, labels) -> int:
         """Choose the best number of ngrams to include in bow.
 
         Given an intent classification problem and a set of ordered ngrams
@@ -402,7 +423,7 @@ class NGramFeaturizer(Featurizer):
 
             n_top = num_ngrams[np.argmax(scores)]
             logger.info("Best score with {} ngrams: {}".format(n_top, np.max(scores)))
-            return n_top
+            return n_top.item()
         else:
             warnings.warn(
                 "Can't cross-validate ngram featurizer. "

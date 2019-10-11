@@ -3,7 +3,6 @@ import time
 import logging
 import os
 import requests
-import simplejson
 from typing import Any, List, Optional, Text, Dict
 
 from rasa.nlu.config import RasaNLUModelConfig
@@ -63,12 +62,15 @@ class DucklingHTTPExtractor(EntityExtractor):
         # timezone like Europe/Berlin
         # if not set the default timezone of Duckling is going to be used
         "timezone": None,
+        # Timeout for receiving response from http url of the running duckling server
+        # if not set the default timeout of duckling http url is set to 3 seconds.
+        "timeout": 3,
     }
 
     def __init__(
         self,
         component_config: Optional[Dict[Text, Any]] = None,
-        language: Optional[List[Text]] = None,
+        language: Optional[Text] = None,
     ) -> None:
 
         super(DucklingHTTPExtractor, self).__init__(component_config)
@@ -85,7 +87,8 @@ class DucklingHTTPExtractor(EntityExtractor):
         if not self.component_config.get("locale"):
             # this is king of a quick fix to generate a proper locale
             # works most of the time
-            locale_fix = "{}_{}".format(self.language, self.language.upper())
+            language = self.language or ""
+            locale_fix = "{}_{}".format(language, language.upper())
             self.component_config["locale"] = locale_fix
         return self.component_config.get("locale")
 
@@ -113,10 +116,13 @@ class DucklingHTTPExtractor(EntityExtractor):
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
             }
             response = requests.post(
-                self._url() + "/parse", data=payload, headers=headers
+                self._url() + "/parse",
+                data=payload,
+                headers=headers,
+                timeout=self.component_config.get("timeout"),
             )
             if response.status_code == 200:
-                return simplejson.loads(response.text)
+                return response.json()
             else:
                 logger.error(
                     "Failed to get a proper response from remote "
@@ -124,10 +130,13 @@ class DucklingHTTPExtractor(EntityExtractor):
                     "".format(response.status_code, response.text)
                 )
                 return []
-        except requests.exceptions.ConnectionError as e:
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ReadTimeout,
+        ) as e:
             logger.error(
                 "Failed to connect to duckling http server. Make sure "
-                "the duckling server is running and the proper host "
+                "the duckling server is running/healthy/not stale and the proper host "
                 "and port are set in the configuration. More "
                 "information on how to run the server can be found on "
                 "github: "
@@ -180,9 +189,10 @@ class DucklingHTTPExtractor(EntityExtractor):
         cls,
         meta: Dict[Text, Any],
         model_dir: Text = None,
-        model_metadata: Metadata = None,
+        model_metadata: Optional[Metadata] = None,
         cached_component: Optional["DucklingHTTPExtractor"] = None,
         **kwargs: Any
     ) -> "DucklingHTTPExtractor":
 
-        return cls(meta, model_metadata.get("language"))
+        language = model_metadata.get("language") if model_metadata else None
+        return cls(meta, language)

@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 
-import mock
+from unittest.mock import patch
+from rasa.nlu.training_data import TrainingData, Message
+from tests.nlu import utilities
+from rasa.nlu import training_data
 
 
 def test_whitespace():
@@ -74,6 +77,94 @@ def test_whitespace():
     ] == [0, 83]
 
 
+def test_whitespace_custom_intent_symbol():
+    from rasa.nlu.tokenizers.whitespace_tokenizer import WhitespaceTokenizer
+
+    component_config = {"intent_tokenization_flag": True, "intent_split_symbol": "+"}
+
+    tk = WhitespaceTokenizer(component_config)
+
+    assert [t.text for t in tk.tokenize("Forecast_for_LUNCH", attribute="intent")] == [
+        "Forecast_for_LUNCH"
+    ]
+
+    assert [t.text for t in tk.tokenize("Forecast+for+LUNCH", attribute="intent")] == [
+        "Forecast",
+        "for",
+        "LUNCH",
+    ]
+
+
+def test_whitespace_with_case():
+    from rasa.nlu.tokenizers.whitespace_tokenizer import WhitespaceTokenizer
+
+    component_config = {"case_sensitive": False}
+    tk = WhitespaceTokenizer(component_config)
+    assert [t.text for t in tk.tokenize("Forecast for LUNCH")] == [
+        "forecast",
+        "for",
+        "lunch",
+    ]
+
+    component_config = {"case_sensitive": True}
+    tk = WhitespaceTokenizer(component_config)
+    assert [t.text for t in tk.tokenize("Forecast for LUNCH")] == [
+        "Forecast",
+        "for",
+        "LUNCH",
+    ]
+
+    component_config = {}
+    tk = WhitespaceTokenizer(component_config)
+    assert [t.text for t in tk.tokenize("Forecast for LUNCH")] == [
+        "Forecast",
+        "for",
+        "LUNCH",
+    ]
+
+    component_config = {"case_sensitive": False}
+    tk = WhitespaceTokenizer(component_config)
+    message = Message("Forecast for LUNCH")
+    tk.process(message)
+    assert message.data.get("tokens")[0].text == "forecast"
+    assert message.data.get("tokens")[1].text == "for"
+    assert message.data.get("tokens")[2].text == "lunch"
+
+    _config = utilities.base_test_conf("supervised_embeddings")
+    examples = [
+        Message(
+            "Any Mexican restaurant will do",
+            {
+                "intent": "restaurant_search",
+                "entities": [
+                    {"start": 4, "end": 11, "value": "Mexican", "entity": "cuisine"}
+                ],
+            },
+        ),
+        Message(
+            "I want Tacos!",
+            {
+                "intent": "restaurant_search",
+                "entities": [
+                    {"start": 7, "end": 12, "value": "Mexican", "entity": "cuisine"}
+                ],
+            },
+        ),
+    ]
+
+    component_config = {"case_sensitive": False}
+    tk = WhitespaceTokenizer(component_config)
+    tk.train(TrainingData(training_examples=examples), _config)
+    assert examples[0].data.get("tokens")[0].text == "any"
+    assert examples[0].data.get("tokens")[1].text == "mexican"
+    assert examples[0].data.get("tokens")[2].text == "restaurant"
+    assert examples[0].data.get("tokens")[3].text == "will"
+    assert examples[0].data.get("tokens")[4].text == "do"
+    assert examples[1].data.get("tokens")[0].text == "i"
+    assert examples[1].data.get("tokens")[1].text == "want"
+    assert examples[1].data.get("tokens")[2].text == "tacos"
+
+
 def test_spacy(spacy_nlp):
     from rasa.nlu.tokenizers.spacy_tokenizer import SpacyTokenizer
 
@@ -97,6 +188,23 @@ def test_spacy(spacy_nlp):
         "?",
     ]
     assert [t.offset for t in tk.tokenize(spacy_nlp(text))] == [0, 4, 13, 16, 20, 23]
+
+
+def test_spacy_intent_tokenizer(spacy_nlp_component):
+    from rasa.nlu.tokenizers.spacy_tokenizer import SpacyTokenizer
+
+    td = training_data.load_data("data/examples/rasa/demo-rasa.json")
+    spacy_nlp_component.train(td, config=None)
+    spacy_tokenizer = SpacyTokenizer()
+    spacy_tokenizer.train(td, config=None)
+
+    intent_tokens_exist = [
+        True if example.get("intent_tokens") is not None else False
+        for example in td.intent_examples
+    ]
+
+    # no intent tokens should have been set
+    assert not any(intent_tokens_exist)
 
 
 def test_mitie():
@@ -141,7 +249,7 @@ def test_jieba_load_dictionary(tmpdir_factory):
 
     component_config = {"dictionary_path": dictionary_path}
 
-    with mock.patch.object(
+    with patch.object(
         JiebaTokenizer, "load_custom_dictionary", return_value=None
     ) as mock_method:
         tk = JiebaTokenizer(component_config)

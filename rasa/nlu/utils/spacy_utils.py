@@ -1,22 +1,36 @@
 import logging
 import typing
-from typing import Any, Dict, List, Optional, Text
+from typing import Any, Dict, List, Optional, Text, Tuple
 
 from rasa.nlu.components import Component
 from rasa.nlu.config import RasaNLUModelConfig, override_defaults
 from rasa.nlu.training_data import Message, TrainingData
+from rasa.nlu.model import InvalidModelError
 
 logger = logging.getLogger(__name__)
 
 if typing.TYPE_CHECKING:
     from spacy.language import Language
-    from spacy.tokens.doc import Doc
+    from spacy.tokens.doc import Doc  # pytype: disable=import-error
     from rasa.nlu.model import Metadata
+
+from rasa.nlu.constants import (
+    MESSAGE_RESPONSE_ATTRIBUTE,
+    MESSAGE_INTENT_ATTRIBUTE,
+    MESSAGE_TEXT_ATTRIBUTE,
+    MESSAGE_TOKENS_NAMES,
+    MESSAGE_ATTRIBUTES,
+    MESSAGE_SPACY_FEATURES_NAMES,
+    MESSAGE_VECTOR_FEATURE_NAMES,
+    SPACY_FEATURIZABLE_ATTRIBUTES,
+)
 
 
 class SpacyNLP(Component):
-
-    provides = ["spacy_doc", "spacy_nlp"]
+    provides = ["spacy_nlp"] + [
+        MESSAGE_SPACY_FEATURES_NAMES[attribute]
+        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES
+    ]
 
     defaults = {
         # name of the language model to load - if it is not set
@@ -38,6 +52,22 @@ class SpacyNLP(Component):
         self.nlp = nlp
         super(SpacyNLP, self).__init__(component_config)
 
+    @staticmethod
+    def load_model(spacy_model_name: Text) -> "Language":
+        """Try loading the model, catching the OSError if missing."""
+        import spacy
+
+        try:
+            return spacy.load(spacy_model_name, disable=["parser"])
+        except OSError:
+            raise InvalidModelError(
+                "Model '{}' is not a linked spaCy model.  "
+                "Please download and/or link a spaCy model, "
+                "e.g. by running:\npython -m spacy download "
+                "en_core_web_md\npython -m spacy link "
+                "en_core_web_md en".format(spacy_model_name)
+            )
+
     @classmethod
     def required_packages(cls) -> List[Text]:
         return ["spacy"]
@@ -46,7 +76,6 @@ class SpacyNLP(Component):
     def create(
         cls, component_config: Dict[Text, Any], config: RasaNLUModelConfig
     ) -> "SpacyNLP":
-        import spacy
 
         component_config = override_defaults(cls.defaults, component_config)
 
@@ -61,7 +90,8 @@ class SpacyNLP(Component):
             "Trying to load spacy model with name '{}'".format(spacy_model_name)
         )
 
-        nlp = spacy.load(spacy_model_name, disable=["parser"])
+        nlp = cls.load_model(spacy_model_name)
+
         cls.ensure_proper_language_model(nlp)
         return cls(component_config, nlp)
 
@@ -80,21 +110,143 @@ class SpacyNLP(Component):
         return {"spacy_nlp": self.nlp}
 
     def doc_for_text(self, text: Text) -> "Doc":
+
+        return self.nlp(self.preprocess_text(text))
+
+    def preprocess_text(self, text):
+
+        if text is None:
+            # converted to empty string so that it can still be passed to spacy.
+            # Another option could be to neglect tokenization of the attribute of this example, but since we are
+            # processing in batch mode, it would get complex to collect all processed and neglected examples.
+            text = ""
         if self.component_config.get("case_sensitive"):
-            return self.nlp(text)
+            return text
         else:
-            return self.nlp(text.lower())
+            return text.lower()
+
+    def get_text(self, example, attribute):
+
+        return self.preprocess_text(example.get(attribute))
+
+    @staticmethod
+    def merge_content_lists(
+        indexed_training_samples: List[Tuple[int, Text]],
+        doc_lists: List[Tuple[int, "Doc"]],
+    ) -> List[Tuple[int, "Doc"]]:
+        """Merge lists with processed Docs back into their original order."""
+
+        dct = dict(indexed_training_samples)
+        dct.update(dict(doc_lists))
+        return sorted(dct.items())
+
+    @staticmethod
+    def filter_training_samples_by_content(
+        indexed_training_samples: List[Tuple[int, Text]]
+    ) -> Tuple[List[Tuple[int, Text]], List[Tuple[int, Text]]]:
+        """Separates empty training samples from content bearing ones."""
+
+        docs_to_pipe = list(
+            filter(
+                lambda training_sample: training_sample[1] != "",
+                indexed_training_samples,
+            )
+        )
+        empty_docs = list(
+            filter(
+                lambda training_sample: training_sample[1] == "",
+                indexed_training_samples,
+            )
+        )
+        return docs_to_pipe, empty_docs
+
+    def process_content_bearing_samples(
+        self, samples_to_pipe: List[Tuple[int, Text]]
+    ) -> List[Tuple[int, "Doc"]]:
+        """Sends content bearing training samples to spaCy's pipe."""
+
+        docs = [
+            (to_pipe_sample[0], doc)
+            for to_pipe_sample, doc in zip(
+                samples_to_pipe,
+                [
+                    doc
+                    for doc in self.nlp.pipe(
+                        [txt for _, txt in samples_to_pipe], batch_size=50
+                    )
+                ],
+            )
+        ]
+        return docs
+
+    def process_non_content_bearing_samples(
+        self, empty_samples: List[Tuple[int, Text]]
+    ) -> List[Tuple[int, "Doc"]]:
+        """Creates empty Doc-objects from zero-lengthed training samples strings."""
+
+        from spacy.tokens import Doc
+
+        n_docs = [
+            (empty_sample[0], doc)
+            for empty_sample, doc in zip(
+                empty_samples, [Doc(self.nlp.vocab) for doc in empty_samples]
+            )
+        ]
+        return n_docs
+
+    def docs_for_training_data(
+        self, training_data: TrainingData
+    ) -> Dict[Text, List[Any]]:
+        attribute_docs = {}
+        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES:
+            texts = [self.get_text(e, attribute) for e in training_data.intent_examples]
+            # Index and freeze indices of the training samples for preserving the order
+            # after processing the data.
+            indexed_training_samples = [(idx, text) for idx, text in enumerate(texts)]
+
+            samples_to_pipe, empty_samples = self.filter_training_samples_by_content(
+                indexed_training_samples
+            )
+
+            content_bearing_docs = self.process_content_bearing_samples(samples_to_pipe)
+
+            non_content_bearing_docs = self.process_non_content_bearing_samples(
+                empty_samples
+            )
+
+            attribute_document_list = self.merge_content_lists(
+                indexed_training_samples,
+                content_bearing_docs + non_content_bearing_docs,
+            )
+
+            # Since we only need the training samples strings, we create a list to get them out
+            # of the tuple.
+            attribute_docs[attribute] = [doc for _, doc in attribute_document_list]
+        return attribute_docs
 
     def train(
         self, training_data: TrainingData, config: RasaNLUModelConfig, **kwargs: Any
     ) -> None:
 
-        for example in training_data.training_examples:
-            example.set("spacy_doc", self.doc_for_text(example.text))
+        attribute_docs = self.docs_for_training_data(training_data)
+
+        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES:
+
+            for idx, example in enumerate(training_data.training_examples):
+                example_attribute_doc = attribute_docs[attribute][idx]
+                if len(example_attribute_doc):
+                    # If length is 0, that means the initial text feature was None and was replaced by ''
+                    # in preprocess method
+                    example.set(
+                        MESSAGE_SPACY_FEATURES_NAMES[attribute], example_attribute_doc
+                    )
 
     def process(self, message: Message, **kwargs: Any) -> None:
 
-        message.set("spacy_doc", self.doc_for_text(message.text))
+        message.set(
+            MESSAGE_SPACY_FEATURES_NAMES[MESSAGE_TEXT_ATTRIBUTE],
+            self.doc_for_text(message.text),
+        )
 
     @classmethod
     def load(
@@ -105,14 +257,13 @@ class SpacyNLP(Component):
         cached_component: Optional["SpacyNLP"] = None,
         **kwargs: Any
     ) -> "SpacyNLP":
-        import spacy
 
         if cached_component:
             return cached_component
 
         model_name = meta.get("model")
 
-        nlp = spacy.load(model_name, disable=["parser"])
+        nlp = cls.load_model(model_name)
         cls.ensure_proper_language_model(nlp)
         return cls(meta, nlp)
 

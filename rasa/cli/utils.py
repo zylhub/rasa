@@ -1,8 +1,18 @@
 import os
 import sys
-from typing import Any, Callable, Dict, Optional, Text
+import json
+from typing import Any, Optional, Text, List, Dict, TYPE_CHECKING
+import logging
+
+if TYPE_CHECKING:
+    from questionary import Question
 
 from rasa.constants import DEFAULT_MODELS_PATH
+
+logger = logging.getLogger(__name__)
+
+
+FREE_TEXT_INPUT_PROMPT = "Type out your own message..."
 
 
 def get_validated_path(
@@ -24,12 +34,20 @@ def get_validated_path(
         The current value if it was valid, else the default value of the
         argument if it is valid, else `None`.
     """
-
     if current is None or current is not None and not os.path.exists(current):
         if default is not None and os.path.exists(default):
-            print_warning(
-                "'{}' not found. Using default location '{}' instead."
-                "".format(current, default)
+            reason_str = "'{}' not found.".format(current)
+            if current is None:
+                reason_str = "Parameter '{}' not set.".format(parameter)
+            else:
+                logger.warning(
+                    "'{}' does not exist. Using default value '{}' instead.".format(
+                        current, default
+                    )
+                )
+
+            logger.debug(
+                "{} Using default location '{}' instead.".format(reason_str, default)
             )
             current = default
         elif none_is_valid:
@@ -38,6 +56,17 @@ def get_validated_path(
             cancel_cause_not_found(current, parameter, default)
 
     return current
+
+
+def missing_config_keys(path: Text, mandatory_keys: List[Text]) -> List:
+    import rasa.utils.io
+
+    if not os.path.exists(path):
+        return mandatory_keys
+
+    config_data = rasa.utils.io.read_config_file(path)
+
+    return [k for k in mandatory_keys if k not in config_data or config_data[k] is None]
 
 
 def cancel_cause_not_found(
@@ -68,7 +97,7 @@ def parse_last_positional_argument_as_model_path() -> None:
 
     if (
         len(sys.argv) >= 2
-        and sys.argv[1] in ["run", "test", "shell", "interactive"]
+        and sys.argv[1] in ["run", "shell", "interactive"]
         and not sys.argv[-2].startswith("-")
         and os.path.exists(sys.argv[-1])
     ):
@@ -77,12 +106,15 @@ def parse_last_positional_argument_as_model_path() -> None:
 
 
 def create_output_path(
-    output_path: Text = DEFAULT_MODELS_PATH, prefix: Text = ""
+    output_path: Text = DEFAULT_MODELS_PATH,
+    prefix: Text = "",
+    fixed_name: Optional[Text] = None,
 ) -> Text:
     """Creates an output path which includes the current timestamp.
 
     Args:
         output_path: The path where the model should be stored.
+        fixed_name: Name of the model.
         prefix: A prefix which should be included in the output path.
 
     Returns:
@@ -93,31 +125,75 @@ def create_output_path(
     if output_path.endswith("tar.gz"):
         return output_path
     else:
-        time_format = "%Y%m%d-%H%M%S"
-        file_name = "{}{}.tar.gz".format(prefix, time.strftime(time_format))
+        if fixed_name:
+            name = fixed_name
+        else:
+            time_format = "%Y%m%d-%H%M%S"
+            name = time.strftime(time_format)
+            name = "{}{}".format(prefix, name)
+        file_name = "{}.tar.gz".format(name)
         return os.path.join(output_path, file_name)
 
 
-def minimal_kwargs(kwargs: Dict[Text, Any], func: Callable) -> Dict[Text, Any]:
-    """Returns only the kwargs which are required by a function.
+def button_to_string(button: Dict[Text, Any], idx: int = 0) -> Text:
+    """Create a string representation of a button."""
 
-    Args:
-        kwargs: All available kwargs.
-        func: The function which should be called.
+    title = button.pop("title", "")
 
-    Returns:
-        Subset of kwargs which are accepted by `func`.
+    if "payload" in button:
+        payload = " ({})".format(button.pop("payload"))
+    else:
+        payload = ""
 
+    # if there are any additional attributes, we append them to the output
+    if button:
+        details = " - {}".format(json.dumps(button, sort_keys=True))
+    else:
+        details = ""
+
+    button_string = "{idx}: {title}{payload}{details}".format(
+        idx=idx + 1, title=title, payload=payload, details=details
+    )
+
+    return button_string
+
+
+def element_to_string(element: Dict[Text, Any], idx: int = 0) -> Text:
+    """Create a string representation of an element."""
+    title = element.pop("title", "")
+
+    element_string = "{idx}: {title} - {element}".format(
+        idx=idx + 1, title=title, element=json.dumps(element, sort_keys=True)
+    )
+
+    return element_string
+
+
+def button_choices_from_message_data(
+    message: Dict[Text, Any], allow_free_text_input: bool = True
+) -> "Question":
+    """Return list of choices to present to the user.
+
+    If allow_free_text_input is True, an additional option is added
+    at the end along with the template buttons that allows the user
+    to type in free text.
     """
-    from rasa.utils.common import arguments_of
+    choices = [
+        button_to_string(button, idx)
+        for idx, button in enumerate(message.get("buttons"))
+    ]
+    if allow_free_text_input:
+        choices.append(FREE_TEXT_INPUT_PROMPT)
+    return choices
 
-    possible_arguments = arguments_of(func)
 
-    return {k: v for k, v in kwargs.items() if k in possible_arguments}
-
-
-def print_success(*args: Any):
-    print_color(*args, color=bcolors.OKGREEN)
+def payload_from_button_question(button_question: "Question") -> Text:
+    """Prompt user with a button question and returns the nlu payload."""
+    response = button_question.ask()
+    if response != FREE_TEXT_INPUT_PROMPT:
+        # Extract intent slash command if it's a button
+        response = response[response.find("(") + 1 : response.find(")")]
+    return response
 
 
 class bcolors(object):
@@ -139,12 +215,27 @@ def print_color(*args: Any, color: Text):
     print (wrap_with_color(*args, color=color))
 
 
+def print_success(*args: Any):
+    print_color(*args, color=bcolors.OKGREEN)
+
+
+def print_info(*args: Any):
+    print_color(*args, color=bcolors.OKBLUE)
+
+
 def print_warning(*args: Any):
     print_color(*args, color=bcolors.WARNING)
 
 
 def print_error(*args: Any):
     print_color(*args, color=bcolors.FAIL)
+
+
+def print_error_and_exit(message: Text, exit_code: int = 1) -> None:
+    """Print error message and exit the application."""
+
+    print_error(message)
+    sys.exit(exit_code)
 
 
 def signal_handler(sig, frame):

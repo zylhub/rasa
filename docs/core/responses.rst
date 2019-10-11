@@ -1,21 +1,26 @@
-:desc: Read more how to define bot utterances or use a service to generate the
-       responses using Rasa Stack as an open source chatbot platform.
+:desc: Read how to define assistant utterances or use a service to generate the
+       responses using Rasa as an open source chat assistant platform.
 
 .. _responses:
 
-Bot Responses
-=============
+Responses
+=========
 
-If you want your bot to respond to user messages, you need to manage
-the bots responses. In the training data for your bot,
-:ref:`your stories<stories>`, you specify the actions your bot
+.. edit-link::
+
+If you want your assistant to respond to user messages, you need to manage
+these responses. In the training data for your bot,
+your stories, you specify the actions your bot
 should execute. These actions
 can use utterances to send messages back to the user.
 
-There are two ways to manage these utterances:
+There are three ways to manage these utterances:
 
-1. include your bot utterances in your domain file or
-2. use an external service to generate the responses
+1. Utterances are normally stored in your domain file, see :ref:`here <domain-utterances>`
+2. Retrieval action responses are part of the training data, see :ref:`here <retrieval-actions>`
+3. You can also create a custom NLG service to generate responses, see :ref:`here <custom-nlg-service>`
+
+.. _domain-utterances:
 
 Including the utterances in the domain
 --------------------------------------
@@ -28,27 +33,36 @@ available entities, slots and intents.
    :language: yaml
 
 In this example domain file, the section ``templates`` contains the
-template the bot uses to send messages to the user.
+template the assistant uses to send messages to the user.
 
-If you want to change the text, or any other part of the bots response,
-you need to retrain the bot before these changes will be picked up.
+.. note::
+
+    If you want to change the text, or any other part of the bots response,
+    you need to retrain the assistant before these changes will be picked up.
+
+.. note::
+
+    utterances that are used in a story should be listed in the ``stories``
+    section of the domain.yml file. In this example, the ``utter_channel``
+    utterance is not used in a story so it is not listed in that section.
 
 More details about the format of these responses can be found in the
 documentation about the domain file format: :ref:`utter_templates`.
 
+.. _custom-nlg-service:
 
-Managing bot utterances using an external CMS
----------------------------------------------
+Creating your own NLG service for bot responses
+-----------------------------------------------
 
-Retraining the bot, just to change the text copy can be suboptimal for
+Retraining the bot just to change the text copy can be suboptimal for
 some workflows. That's why Core also allows you to outsource the
 response generation and separate it from the dialogue learning.
 
-The bot will still learn to predict actions and to react to user input
+The assistant will still learn to predict actions and to react to user input
 based on past dialogues, but the responses it sends back to the user
 are generated outside of Rasa Core.
 
-If the bot wants to send a message to the user, it will call an
+If the assistant wants to send a message to the user, it will call an
 external HTTP server with a ``POST`` request. To configure this endpoint,
 you need to create an ``endpoints.yml`` and pass it either to the ``run``
 or ``server`` script. The content of the ``endpoints.yml`` should be
@@ -56,15 +70,17 @@ or ``server`` script. The content of the ``endpoints.yml`` should be
 .. literalinclude:: ../../data/test_endpoints/example_endpoints.yml
    :language: yaml
 
-and you can use this file like this:
+Then pass the ``enable-api`` flag to the ``rasa run`` command when starting
+the server:
 
-.. code-block:: bash
+.. code-block:: shell
 
-    $ rasa run core \
-       --enable_api \
+    $ rasa run \
+       --enable-api \
        -m examples/babi/models \
-       -o out.log \
+       --log-file out.log \
        --endpoints endpoints.yml
+
 
 The body of the ``POST`` request sent to the endpoint will look
 like this:
@@ -139,7 +155,4 @@ The endpoint then needs to respond with the generated response:
       "attachments": []
   }
 
-The bot will then use this response and sent it back to the user.
-
-
-.. include:: feedback.inc
+Rasa will then use this response and sent it back to the user.

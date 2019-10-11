@@ -20,6 +20,7 @@ from rasa.core.domain import Domain
 from rasa.core.featurizers import TrackerFeaturizer, MaxHistoryTrackerFeaturizer
 from rasa.core.policies.policy import Policy
 from rasa.core.trackers import DialogueStateTracker
+from rasa.core.constants import DEFAULT_POLICY_PRIORITY
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class SklearnPolicy(Policy):
     def __init__(
         self,
         featurizer: Optional[MaxHistoryTrackerFeaturizer] = None,
-        priority: int = 1,
+        priority: int = DEFAULT_POLICY_PRIORITY,
         model: Optional["sklearn.base.BaseEstimator"] = None,
         param_grid: Optional[Dict[Text, List] or List[Dict]] = None,
         cv: Optional[int] = None,
@@ -88,12 +89,10 @@ class SklearnPolicy(Policy):
     def _state(self):
         return {attr: getattr(self, attr) for attr in self._pickle_params}
 
-    def model_architecture(self):
+    def model_architecture(self, **kwargs):
         # filter out kwargs that cannot be passed to model
-        self._train_params = self._get_valid_params(
-            self.model.__init__, **self._train_params
-        )
-        return self.model.set_params(**self._train_params)
+        train_params = self._get_valid_params(self.model.__init__, **kwargs)
+        return self.model.set_params(**train_params)
 
     def _extract_training_data(self, training_data):
         # transform y from one-hot to num_classes
@@ -128,7 +127,8 @@ class SklearnPolicy(Policy):
         training_data = self.featurize_for_training(training_trackers, domain, **kwargs)
 
         X, y = self._extract_training_data(training_data)
-        model = self.model_architecture(**kwargs)
+        self._train_params.update(kwargs)
+        model = self.model_architecture(**self._train_params)
         score = None
         # Note: clone is called throughout to avoid mutating default
         # arguments.

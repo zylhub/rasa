@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from types import LambdaType
 from typing import Any, Dict, List, Optional, Text, Tuple
 
@@ -7,21 +8,28 @@ import numpy as np
 import time
 
 from rasa.core import jobs
-from rasa.core.actions import Action
+from rasa.core.actions.action import Action
 from rasa.core.actions.action import ACTION_LISTEN_NAME, ActionExecutionRejection
-from rasa.core.channels import CollectingOutputChannel, UserMessage
-from rasa.core.constants import ACTION_NAME_SENDER_ID_CONNECTOR_STR, USER_INTENT_RESTART
-from rasa.core.dispatcher import Dispatcher
+from rasa.core.channels.channel import (
+    CollectingOutputChannel,
+    UserMessage,
+    OutputChannel,
+)
+from rasa.core.constants import (
+    ACTION_NAME_SENDER_ID_CONNECTOR_STR,
+    USER_INTENT_RESTART,
+    UTTER_PREFIX,
+)
 from rasa.core.domain import Domain
 from rasa.core.events import (
     ActionExecuted,
     ActionExecutionRejected,
-    BotUttered,
     Event,
     ReminderCancelled,
     ReminderScheduled,
     SlotSet,
     UserUttered,
+    BotUttered,
 )
 from rasa.core.interpreter import (
     INTENT_MESSAGE_PREFIX,
@@ -37,6 +45,9 @@ from rasa.utils.endpoints import EndpointConfig
 logger = logging.getLogger(__name__)
 
 
+MAX_NUMBER_OF_PREDICTIONS = int(os.environ.get("MAX_NUMBER_OF_PREDICTIONS", "10"))
+
+
 class MessageProcessor(object):
     def __init__(
         self,
@@ -46,7 +57,7 @@ class MessageProcessor(object):
         tracker_store: TrackerStore,
         generator: NaturalLanguageGenerator,
         action_endpoint: Optional[EndpointConfig] = None,
-        max_number_of_predictions: int = 10,
+        max_number_of_predictions: int = MAX_NUMBER_OF_PREDICTIONS,
         message_preprocessor: Optional[LambdaType] = None,
         on_circuit_break: Optional[LambdaType] = None,
     ):
@@ -60,12 +71,23 @@ class MessageProcessor(object):
         self.on_circuit_break = on_circuit_break
         self.action_endpoint = action_endpoint
 
-    async def handle_message(self, message: UserMessage) -> Optional[List[Text]]:
+    async def handle_message(
+        self, message: UserMessage
+    ) -> Optional[List[Dict[Text, Any]]]:
         """Handle a single message with this processor."""
 
         # preprocess message if necessary
-        tracker = await self.log_message(message)
+        tracker = await self.log_message(message, should_save_tracker=False)
         if not tracker:
+            return None
+
+        if not self.policy_ensemble or not self.domain:
+            # save tracker state to continue conversation from this state
+            self._save_tracker(tracker)
+            logger.warning(
+                "No policy ensemble or domain set. Skipping action prediction "
+                "and execution."
+            )
             return None
 
         await self._predict_and_execute_next_action(message, tracker)
@@ -89,6 +111,13 @@ class MessageProcessor(object):
             )
             return None
 
+        if not self.policy_ensemble or not self.domain:
+            # save tracker state to continue conversation from this state
+            logger.warning(
+                "No policy ensemble or domain set. Skipping action prediction "
+            )
+            return None
+
         probabilities, policy = self._get_next_action_probabilities(tracker)
         # save tracker state to continue conversation from this state
         self._save_tracker(tracker)
@@ -103,7 +132,15 @@ class MessageProcessor(object):
             "tracker": tracker.current_state(EventVerbosity.AFTER_RESTART),
         }
 
-    async def log_message(self, message: UserMessage) -> Optional[DialogueStateTracker]:
+    async def log_message(
+        self, message: UserMessage, should_save_tracker: bool = True
+    ) -> Optional[DialogueStateTracker]:
+        """Log `message` on tracker belonging to the message's conversation_id.
+
+        Optionally save the tracker if `should_save_tracker` is `True`. Tracker saving
+        can be skipped if the tracker returned by this method is used for further
+        processing and saved at a later stage.
+        """
 
         # preprocess message if necessary
         if self.message_preprocessor is not None:
@@ -113,8 +150,10 @@ class MessageProcessor(object):
         tracker = self._get_tracker(message.sender_id)
         if tracker:
             await self._handle_message_with_tracker(message, tracker)
-            # save tracker state to continue conversation from this state
-            self._save_tracker(tracker)
+
+            if should_save_tracker:
+                # save tracker state to continue conversation from this state
+                self._save_tracker(tracker)
         else:
             logger.warning(
                 "Failed to retrieve or create tracker for sender "
@@ -126,7 +165,8 @@ class MessageProcessor(object):
         self,
         sender_id: Text,
         action_name: Text,
-        dispatcher: Dispatcher,
+        output_channel: OutputChannel,
+        nlg: NaturalLanguageGenerator,
         policy: Text,
         confidence: float,
     ) -> Optional[DialogueStateTracker]:
@@ -136,7 +176,9 @@ class MessageProcessor(object):
         tracker = self._get_tracker(sender_id)
         if tracker:
             action = self._get_action(action_name)
-            await self._run_action(action, tracker, dispatcher, policy, confidence)
+            await self._run_action(
+                action, tracker, output_channel, nlg, policy, confidence
+            )
 
             # save tracker state to continue conversation from this state
             self._save_tracker(tracker)
@@ -155,16 +197,18 @@ class MessageProcessor(object):
         This should be overwritten by more advanced policies to use
         ML to predict the action. Returns the index of the next action."""
 
-        probabilities, policy = self._get_next_action_probabilities(tracker)
+        action_confidences, policy = self._get_next_action_probabilities(tracker)
 
-        max_index = int(np.argmax(probabilities))
-        action = self.domain.action_for_index(max_index, self.action_endpoint)
+        max_confidence_index = int(np.argmax(action_confidences))
+        action = self.domain.action_for_index(
+            max_confidence_index, self.action_endpoint
+        )
         logger.debug(
-            "Predicted next action '{}' with prob {:.2f}.".format(
-                action.name(), probabilities[max_index]
+            "Predicted next action '{}' with confidence {:.2f}.".format(
+                action.name(), action_confidences[max_confidence_index]
             )
         )
-        return action, policy, probabilities[max_index]
+        return action, policy, action_confidences[max_confidence_index]
 
     @staticmethod
     def _is_reminder(e: Event, name: Text) -> bool:
@@ -195,16 +239,20 @@ class MessageProcessor(object):
         return True  # tracker has probably been restarted
 
     async def handle_reminder(
-        self, reminder_event: ReminderScheduled, dispatcher: Dispatcher
+        self,
+        reminder_event: ReminderScheduled,
+        sender_id: Text,
+        output_channel: OutputChannel,
+        nlg: NaturalLanguageGenerator,
     ) -> None:
         """Handle a reminder that is triggered asynchronously."""
 
-        tracker = self._get_tracker(dispatcher.sender_id)
+        tracker = self._get_tracker(sender_id)
 
         if not tracker:
             logger.warning(
                 "Failed to retrieve or create tracker for sender "
-                "'{}'.".format(dispatcher.sender_id)
+                "'{}'.".format(sender_id)
             )
             return None
 
@@ -224,11 +272,11 @@ class MessageProcessor(object):
             # unrelated message would influence featurization
             tracker.update(UserUttered.empty())
             action = self._get_action(reminder_event.action_name)
-            should_continue = await self._run_action(action, tracker, dispatcher)
+            should_continue = await self._run_action(
+                action, tracker, output_channel, nlg
+            )
             if should_continue:
-                user_msg = UserMessage(
-                    None, dispatcher.output_channel, dispatcher.sender_id
-                )
+                user_msg = UserMessage(None, output_channel, sender_id)
                 await self._predict_and_execute_next_action(user_msg, tracker)
             # save tracker state to continue conversation from this state
             self._save_tracker(tracker)
@@ -239,21 +287,46 @@ class MessageProcessor(object):
         slot_values = "\n".join(
             ["\t{}: {}".format(s.name, s.value) for s in tracker.slots.values()]
         )
-        logger.debug("Current slot values: \n{}".format(slot_values))
+        if slot_values.strip():
+            logger.debug("Current slot values: \n{}".format(slot_values))
+
+    def _log_unseen_intent(self, parse_data: Dict[Text, Any]) -> None:
+        """check if the NLU picks up intent that aren't in the domain.
+        """
+        intent = parse_data["intent"]["name"]
+        if intent and self.domain and intent not in self.domain.intents:
+            logger.warning(
+                "Interpreter parsed an intent '{}' "
+                "that is not defined in the domain.".format(intent)
+            )
+
+    def _log_unseen_enitites(self, parse_data: Dict[Text, Any]) -> None:
+        """check if the NLU picks up entities that aren't in the domain.
+        """
+        entities = parse_data["entities"]
+        for element in entities:
+            entity = element["entity"]
+            if entity and self.domain and entity not in self.domain.entities:
+                logger.warning(
+                    "Interpreter parsed an entity '{}' "
+                    "that is not defined in the domain.".format(entity)
+                )
 
     def _get_action(self, action_name):
         return self.domain.action_for_name(action_name, self.action_endpoint)
 
-    async def _parse_message(self, message):
+    async def _parse_message(self, message, tracker: DialogueStateTracker = None):
         # for testing - you can short-cut the NLU part with a message
         # in the format /intent{"entity1": val1, "entity2": val2}
         # parse_data is a dict of intent & entities
         if message.text.startswith(INTENT_MESSAGE_PREFIX):
             parse_data = await RegexInterpreter().parse(
-                message.text, message.message_id
+                message.text, message.message_id, tracker
             )
         else:
-            parse_data = await self.interpreter.parse(message.text, message.message_id)
+            parse_data = await self.interpreter.parse(
+                message.text, message.message_id, tracker
+            )
 
         logger.debug(
             "Received user message '{}' with intent '{}' "
@@ -261,6 +334,11 @@ class MessageProcessor(object):
                 message.text, parse_data["intent"], parse_data["entities"]
             )
         )
+        # check if we pick up intents that aren't in the domain
+        self._log_unseen_intent(parse_data)
+        # check if we pick up entities that aren't in the domain
+        self._log_unseen_enitites(parse_data)
+
         return parse_data
 
     async def _handle_message_with_tracker(
@@ -270,7 +348,7 @@ class MessageProcessor(object):
         if message.parse_data:
             parse_data = message.parse_data
         else:
-            parse_data = await self._parse_message(message)
+            parse_data = await self._parse_message(message, tracker)
 
         # don't ever directly mutate the tracker
         # - instead pass its events to log
@@ -282,11 +360,10 @@ class MessageProcessor(object):
                 parse_data,
                 input_channel=message.input_channel,
                 message_id=message.message_id,
-            )
+                metadata=message.metadata,
+            ),
+            self.domain,
         )
-        # store all entities as slots
-        for e in self.domain.slots_for_entities(parse_data["entities"]):
-            tracker.update(e)
 
         if parse_data["entities"]:
             self._log_slots(tracker)
@@ -297,13 +374,15 @@ class MessageProcessor(object):
         )
 
     @staticmethod
-    def _should_handle_message(tracker):
+    def _should_handle_message(tracker: DialogueStateTracker):
         return (
             not tracker.is_paused()
             or tracker.latest_message.intent.get("name") == USER_INTENT_RESTART
         )
 
-    async def _predict_and_execute_next_action(self, message, tracker):
+    async def _predict_and_execute_next_action(
+        self, message: UserMessage, tracker: DialogueStateTracker
+    ):
         # keep taking actions decided by the policy until it chooses to 'listen'
         should_predict_another_action = True
         num_predicted_actions = 0
@@ -313,9 +392,6 @@ class MessageProcessor(object):
                 num_predicted_actions == self.max_number_of_predictions
                 and should_predict_another_action
             )
-
-        # this will actually send the response to the user
-        dispatcher = Dispatcher(message.sender_id, message.output_channel, self.nlg)
 
         # action loop. predicts actions until we hit action listen
         while (
@@ -327,7 +403,7 @@ class MessageProcessor(object):
             action, policy, confidence = self.predict_next_action(tracker)
 
             should_predict_another_action = await self._run_action(
-                action, tracker, dispatcher, policy, confidence
+                action, tracker, message.output_channel, self.nlg, policy, confidence
             )
             num_predicted_actions += 1
 
@@ -339,7 +415,7 @@ class MessageProcessor(object):
             )
             if self.on_circuit_break:
                 # call a registered callback
-                self.on_circuit_break(tracker, dispatcher)
+                self.on_circuit_break(tracker, message.output_channel, self.nlg)
 
     # noinspection PyUnusedLocal
     @staticmethod
@@ -347,8 +423,26 @@ class MessageProcessor(object):
         is_listen_action = action_name == ACTION_LISTEN_NAME
         return not is_listen_action
 
+    @staticmethod
+    async def _send_bot_messages(
+        events: List[Event],
+        tracker: DialogueStateTracker,
+        output_channel: OutputChannel,
+    ) -> None:
+        """Send all the bot messages that are logged in the events array."""
+
+        for e in events:
+            if not isinstance(e, BotUttered):
+                continue
+
+            await output_channel.send_response(tracker.sender_id, e.message())
+
     async def _schedule_reminders(
-        self, events: List[Event], tracker: DialogueStateTracker, dispatcher: Dispatcher
+        self,
+        events: List[Event],
+        tracker: DialogueStateTracker,
+        output_channel: OutputChannel,
+        nlg: NaturalLanguageGenerator,
     ) -> None:
         """Uses the scheduler to time a job to trigger the passed reminder.
 
@@ -356,20 +450,22 @@ class MessageProcessor(object):
         (i.e. only one of them will eventually run)."""
 
         for e in events:
-            if isinstance(e, ReminderScheduled):
-                (await jobs.scheduler()).add_job(
-                    self.handle_reminder,
-                    "date",
-                    run_date=e.trigger_date_time,
-                    args=[e, dispatcher],
-                    id=e.name,
-                    replace_existing=True,
-                    name=(
-                        str(e.action_name)
-                        + ACTION_NAME_SENDER_ID_CONNECTOR_STR
-                        + tracker.sender_id
-                    ),
-                )
+            if not isinstance(e, ReminderScheduled):
+                continue
+
+            (await jobs.scheduler()).add_job(
+                self.handle_reminder,
+                "date",
+                run_date=e.trigger_date_time,
+                args=[e, tracker.sender_id, output_channel, nlg],
+                id=e.name,
+                replace_existing=True,
+                name=(
+                    str(e.action_name)
+                    + ACTION_NAME_SENDER_ID_CONNECTOR_STR
+                    + tracker.sender_id
+                ),
+            )
 
     @staticmethod
     async def _cancel_reminders(
@@ -391,12 +487,12 @@ class MessageProcessor(object):
                         scheduler.remove_job(j.id)
 
     async def _run_action(
-        self, action, tracker, dispatcher, policy=None, confidence=None
+        self, action, tracker, output_channel, nlg, policy=None, confidence=None
     ):
         # events and return values are used to update
         # the tracker state after an action has been taken
         try:
-            events = await action.run(dispatcher, tracker, self.domain)
+            events = await action.run(output_channel, nlg, tracker, self.domain)
         except ActionExecutionRejection:
             events = [ActionExecutionRejected(action.name(), policy, confidence)]
             tracker.update(events[0])
@@ -405,20 +501,20 @@ class MessageProcessor(object):
             logger.error(
                 "Encountered an exception while running action '{}'. "
                 "Bot will continue, but the actions events are lost. "
-                "Make sure to fix the exception in your custom "
-                "code.".format(action.name())
+                "Please check the logs of your action server for "
+                "more information.".format(action.name())
             )
             logger.debug(e, exc_info=True)
             events = []
 
         self._log_action_on_tracker(tracker, action.name(), events, policy, confidence)
-
-        if action.name() != "action_listen" and "utter_" not in action.name():
+        if action.name() != ACTION_LISTEN_NAME and not action.name().startswith(
+            UTTER_PREFIX
+        ):
             self._log_slots(tracker)
 
-        self.log_bot_utterances_on_tracker(tracker, dispatcher)
-
-        await self._schedule_reminders(events, tracker, dispatcher)
+        await self._send_bot_messages(events, tracker, output_channel)
+        await self._schedule_reminders(events, tracker, output_channel, nlg)
         await self._cancel_reminders(events, tracker)
 
         return self.should_predict_another_action(action.name(), events)
@@ -451,19 +547,6 @@ class MessageProcessor(object):
                             "".format(action_name, e.key, json.dumps(e.value))
                         )
 
-    @staticmethod
-    def log_bot_utterances_on_tracker(
-        tracker: DialogueStateTracker, dispatcher: Dispatcher
-    ) -> None:
-
-        if dispatcher.latest_bot_messages:
-            for m in dispatcher.latest_bot_messages:
-                bot_utterance = BotUttered(text=m.text, data=m.data)
-                logger.debug("Bot utterance '{}'".format(bot_utterance))
-                tracker.update(bot_utterance)
-
-            dispatcher.latest_bot_messages = []
-
     def _log_action_on_tracker(self, tracker, action_name, events, policy, confidence):
         # Ensures that the code still works even if a lazy programmer missed
         # to type `return []` at the end of an action or the run method
@@ -489,7 +572,7 @@ class MessageProcessor(object):
             # the timestamp would indicate a time before the time
             # of the action executed
             e.timestamp = time.time()
-            tracker.update(e)
+            tracker.update(e, self.domain)
 
     def _get_tracker(self, sender_id: Text) -> Optional[DialogueStateTracker]:
         sender_id = sender_id or UserMessage.DEFAULT_SENDER_ID
