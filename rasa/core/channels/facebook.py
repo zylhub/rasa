@@ -5,6 +5,7 @@ from fbmessenger import MessengerClient
 from fbmessenger.attachments import Image
 from fbmessenger.elements import Text as FBText
 from fbmessenger.quick_replies import QuickReplies, QuickReply
+from rasa.utils.common import raise_warning
 from sanic import Blueprint, response
 from sanic.request import Request
 from typing import Text, List, Dict, Any, Callable, Awaitable, Iterable, Optional
@@ -88,7 +89,7 @@ class Messenger:
         else:
             logger.warning(
                 "Received a message from facebook that we can not "
-                "handle. Message: {}".format(message)
+                f"handle. Message: {message}"
             )
             return
 
@@ -132,7 +133,7 @@ class MessengerBot(OutputChannel):
     def __init__(self, messenger_client: MessengerClient) -> None:
 
         self.messenger_client = messenger_client
-        super(MessengerBot, self).__init__()
+        super().__init__()
 
     def send(self, recipient_id: Text, element: Any) -> None:
         """Sends a message to the recipient using the messenger client."""
@@ -147,7 +148,7 @@ class MessengerBot(OutputChannel):
     ) -> None:
         """Send a message through this channel."""
 
-        for message_part in text.split("\n\n"):
+        for message_part in text.strip().split("\n\n"):
             self.send(recipient_id, FBText(text=message_part))
 
     async def send_image_url(
@@ -162,13 +163,13 @@ class MessengerBot(OutputChannel):
         recipient_id: Text,
         text: Text,
         buttons: List[Dict[Text, Any]],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Sends buttons to the output."""
 
         # buttons is a list of tuples: [(option_name,payload)]
         if len(buttons) > 3:
-            logger.warning(
+            raise_warning(
                 "Facebook API currently allows only up to 3 buttons. "
                 "If you add more, all will be ignored."
             )
@@ -196,7 +197,7 @@ class MessengerBot(OutputChannel):
         recipient_id: Text,
         text: Text,
         quick_replies: List[Dict[Text, Any]],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Sends quick replies to the output."""
 
@@ -209,7 +210,8 @@ class MessengerBot(OutputChannel):
         """Sends elements to the output."""
 
         for element in elements:
-            self._add_postback_info(element["buttons"])
+            if "buttons" in element:
+                self._add_postback_info(element["buttons"])
 
         payload = {
             "attachment": {
@@ -336,7 +338,9 @@ class FacebookInput(InputChannel):
         return fb_webhook
 
     @staticmethod
-    def validate_hub_signature(app_secret, request_payload, hub_signature_header):
+    def validate_hub_signature(
+        app_secret, request_payload, hub_signature_header
+    ) -> bool:
         """Make sure the incoming webhook requests are properly signed.
 
         Args:

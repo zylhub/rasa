@@ -1,13 +1,13 @@
 import logging
 import uuid
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Text
+
+from rasa.core.channels.channel import InputChannel, OutputChannel, UserMessage
+from rasa.utils.common import raise_warning
 from sanic import Blueprint, response
 from sanic.request import Request
 from sanic.response import HTTPResponse
 from socketio import AsyncServer
-from typing import Optional, Text, Any, List, Dict, Iterable, Callable, Awaitable
-
-from rasa.core.channels.channel import InputChannel
-from rasa.core.channels.channel import UserMessage, OutputChannel
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +16,19 @@ class SocketBlueprint(Blueprint):
     def __init__(self, sio: AsyncServer, socketio_path, *args, **kwargs):
         self.sio = sio
         self.socketio_path = socketio_path
-        super(SocketBlueprint, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
-    def register(self, app, options):
+    def register(self, app, options) -> None:
         self.sio.attach(app, self.socketio_path)
-        super(SocketBlueprint, self).register(app, options)
+        super().register(app, options)
 
 
 class SocketIOOutput(OutputChannel):
     @classmethod
-    def name(cls):
+    def name(cls) -> Text:
         return "socketio"
 
-    def __init__(self, sio, sid, bot_message_evt):
+    def __init__(self, sio, sid, bot_message_evt) -> None:
         self.sio = sio
         self.sid = sid
         self.bot_message_evt = bot_message_evt
@@ -43,7 +43,8 @@ class SocketIOOutput(OutputChannel):
     ) -> None:
         """Send a message through this channel."""
 
-        await self._send_message(self.sid, {"text": text})
+        for message_part in text.strip().split("\n\n"):
+            await self._send_message(self.sid, {"text": message_part})
 
     async def send_image_url(
         self, recipient_id: Text, image: Text, **kwargs: Any
@@ -58,14 +59,19 @@ class SocketIOOutput(OutputChannel):
         recipient_id: Text,
         text: Text,
         buttons: List[Dict[Text, Any]],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Sends buttons to the output."""
 
-        message = {"text": text, "quick_replies": []}
+        # split text and create a message for each text fragment
+        # the `or` makes sure there is at least one message we can attach the quick
+        # replies to
+        message_parts = text.strip().split("\n\n") or [text]
+        messages = [{"text": message, "quick_replies": []} for message in message_parts]
 
+        # attach all buttons to the last text fragment
         for button in buttons:
-            message["quick_replies"].append(
+            messages[-1]["quick_replies"].append(
                 {
                     "content_type": "text",
                     "title": button["title"],
@@ -73,7 +79,8 @@ class SocketIOOutput(OutputChannel):
                 }
             )
 
-        await self._send_message(self.sid, message)
+        for message in messages:
+            await self._send_message(self.sid, message)
 
     async def send_elements(
         self, recipient_id: Text, elements: Iterable[Dict[Text, Any]], **kwargs: Any
@@ -154,11 +161,11 @@ class SocketIOInput(InputChannel):
 
         @sio.on("connect", namespace=self.namespace)
         async def connect(sid: Text, _) -> None:
-            logger.debug("User {} connected to socketIO endpoint.".format(sid))
+            logger.debug(f"User {sid} connected to socketIO endpoint.")
 
         @sio.on("disconnect", namespace=self.namespace)
         async def disconnect(sid: Text) -> None:
-            logger.debug("User {} disconnected from socketIO endpoint.".format(sid))
+            logger.debug(f"User {sid} disconnected from socketIO endpoint.")
 
         @sio.on("session_request", namespace=self.namespace)
         async def session_request(sid: Text, data: Optional[Dict]):
@@ -167,7 +174,7 @@ class SocketIOInput(InputChannel):
             if "session_id" not in data or data["session_id"] is None:
                 data["session_id"] = uuid.uuid4().hex
             await sio.emit("session_confirm", data["session_id"], room=sid)
-            logger.debug("User {} connected to socketIO endpoint.".format(sid))
+            logger.debug(f"User {sid} connected to socketIO endpoint.")
 
         @sio.on(self.user_message_evt, namespace=self.namespace)
         async def handle_message(sid: Text, data: Dict) -> Any:
@@ -175,8 +182,8 @@ class SocketIOInput(InputChannel):
 
             if self.session_persistence:
                 if not data.get("session_id"):
-                    logger.warning(
-                        "A message without a valid sender_id "
+                    raise_warning(
+                        "A message without a valid session_id "
                         "was received. This message will be "
                         "ignored. Make sure to set a proper "
                         "session id using the "

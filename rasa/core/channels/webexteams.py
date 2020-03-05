@@ -27,7 +27,7 @@ class WebexTeamsBot(OutputChannel):
         self, recipient_id: Text, text: Text, **kwargs: Any
     ) -> None:
         recipient = self.room or recipient_id
-        for message_part in text.split("\n\n"):
+        for message_part in text.strip().split("\n\n"):
             self.api.messages.create(roomId=recipient, text=message_part)
 
     async def send_image_url(
@@ -92,7 +92,7 @@ class WebexTeamsInput(InputChannel):
             )
             await on_new_message(user_msg)
         except Exception as e:
-            logger.error("Exception when trying to handle message.{0}".format(e))
+            logger.error(f"Exception when trying to handle message.{e}")
             logger.error(str(e), exc_info=True)
 
     def blueprint(

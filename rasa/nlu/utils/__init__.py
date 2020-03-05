@@ -1,8 +1,9 @@
-import io
 import json
 import os
 import re
 from typing import Any, Dict, List, Optional, Text
+
+import rasa.utils.io as io_utils
 
 # backwards compatibility 1.0.x
 # noinspection PyUnresolvedReferences
@@ -48,11 +49,10 @@ def write_json_to_file(filename: Text, obj: Any, **kwargs: Any) -> None:
     write_to_file(filename, json_to_string(obj, **kwargs))
 
 
-def write_to_file(filename: Text, text: Text) -> None:
+def write_to_file(filename: Text, text: Any) -> None:
     """Write a text to a file."""
 
-    with io.open(filename, "w", encoding="utf-8") as f:
-        f.write(str(text))
+    io_utils.write_text_file(str(text), filename)
 
 
 def build_entity(
@@ -104,25 +104,3 @@ def remove_model(model_dir: Text) -> bool:
             "Cannot remove {}, it seems it is not a model "
             "directory".format(model_dir)
         )
-
-
-def json_unpickle(file_name: Text) -> Any:
-    """Unpickle an object from file using json."""
-    import jsonpickle.ext.numpy as jsonpickle_numpy
-    import jsonpickle
-
-    jsonpickle_numpy.register_handlers()
-
-    with open(file_name, "r", encoding="utf-8") as f:
-        return jsonpickle.loads(f.read())
-
-
-def json_pickle(file_name: Text, obj: Any) -> None:
-    """Pickle an object to a file using json."""
-    import jsonpickle.ext.numpy as jsonpickle_numpy
-    import jsonpickle
-
-    jsonpickle_numpy.register_handlers()
-
-    with open(file_name, "w", encoding="utf-8") as f:
-        f.write(jsonpickle.dumps(obj))

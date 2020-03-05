@@ -247,9 +247,9 @@ the action ``action_query_knowledge_base``. For example:
     * goodbye
       - utter_goodbye
 
-The last thing you need to do is to define the template ``utter_ask_rephrase`` in your domain file.
-If the action doesn't know how to handle the user's request, it will use this template to ask the user to rephrase.
-For example, add the following templates to your domain file:
+The last thing you need to do is to define the response ``utter_ask_rephrase`` in your domain file.
+If the action doesn't know how to handle the user's request, it will use this response to ask the user to rephrase.
+For example, add the following responses to your domain file:
 
 .. code-block:: md
 
@@ -358,7 +358,7 @@ The default mapping looks like:
           "8": lambda l: l[7],
           "9": lambda l: l[8],
           "10": lambda l: l[9],
-          "ANY": lambda l: random.choice(list),
+          "ANY": lambda l: random.choice(l),
           "LAST": lambda l: l[-1],
       }
 
@@ -526,7 +526,7 @@ You can customize your ``InMemoryKnowledgeBase`` by overwriting the following fu
           "8": lambda l: l[7],
           "9": lambda l: l[8],
           "10": lambda l: l[9],
-          "ANY": lambda l: random.choice(list),
+          "ANY": lambda l: random.choice(l),
           "LAST": lambda l: l[-1],
       }
 

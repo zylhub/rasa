@@ -1,43 +1,53 @@
-MESSAGE_TEXT_ATTRIBUTE = "text"
+TEXT = "text"
 
-MESSAGE_RESPONSE_KEY_ATTRIBUTE = "response_key"
+RESPONSE_KEY_ATTRIBUTE = "response_key"
 
-MESSAGE_INTENT_ATTRIBUTE = "intent"
+INTENT = "intent"
 
-MESSAGE_RESPONSE_ATTRIBUTE = "response"
+RESPONSE = "response"
 
-MESSAGE_ENTITIES_ATTRIBUTE = "entities"
+ENTITIES = "entities"
+BILOU_ENTITIES = "bilou_entities"
+NO_ENTITY_TAG = "O"
 
-MESSAGE_NER_FEATURES_ATTRIBUTE = "ner_features"
+EXTRACTOR = "extractor"
 
-MESSAGE_ATTRIBUTES = [
-    MESSAGE_TEXT_ATTRIBUTE,
-    MESSAGE_INTENT_ATTRIBUTE,
-    MESSAGE_RESPONSE_ATTRIBUTE,
-]
+PRETRAINED_EXTRACTORS = {"DucklingHTTPExtractor", "SpacyEntityExtractor"}
 
-MESSAGE_TOKENS_NAMES = {
-    MESSAGE_TEXT_ATTRIBUTE: "tokens",
-    MESSAGE_INTENT_ATTRIBUTE: "intent_tokens",
-    MESSAGE_RESPONSE_ATTRIBUTE: "response_tokens",
-    MESSAGE_ENTITIES_ATTRIBUTE: "tokens",
+CLS_TOKEN = "__CLS__"
+
+MESSAGE_ATTRIBUTES = [TEXT, INTENT, RESPONSE]
+
+TOKENS_NAMES = {TEXT: "tokens", INTENT: "intent_tokens", RESPONSE: "response_tokens"}
+
+SPARSE_FEATURE_NAMES = {
+    TEXT: "text_sparse_features",
+    INTENT: "intent_sparse_features",
+    RESPONSE: "response_sparse_features",
 }
 
-MESSAGE_VECTOR_FEATURE_NAMES = {
-    MESSAGE_TEXT_ATTRIBUTE: "text_features",
-    MESSAGE_INTENT_ATTRIBUTE: "intent_features",
-    MESSAGE_RESPONSE_ATTRIBUTE: "response_features",
-    MESSAGE_ENTITIES_ATTRIBUTE: "ner_features",
+DENSE_FEATURE_NAMES = {
+    TEXT: "text_dense_features",
+    INTENT: "intent_dense_features",
+    RESPONSE: "response_dense_features",
 }
 
-MESSAGE_SPACY_FEATURES_NAMES = {
-    MESSAGE_TEXT_ATTRIBUTE: "spacy_doc",
-    MESSAGE_RESPONSE_ATTRIBUTE: "response_spacy_doc",
+LANGUAGE_MODEL_DOCS = {
+    TEXT: "text_language_model_doc",
+    RESPONSE: "response_language_model_doc",
 }
 
-SPACY_FEATURIZABLE_ATTRIBUTES = [MESSAGE_TEXT_ATTRIBUTE, MESSAGE_RESPONSE_ATTRIBUTE]
+TOKEN_IDS = "token_ids"
+TOKENS = "tokens"
+SEQUENCE_FEATURES = "sequence_features"
+SENTENCE_FEATURES = "sentence_features"
 
-MESSAGE_SELECTOR_PROPERTY_NAME = "response_selector"
+SPACY_DOCS = {TEXT: "text_spacy_doc", RESPONSE: "response_spacy_doc"}
+
+
+DENSE_FEATURIZABLE_ATTRIBUTES = [TEXT, RESPONSE]
+
+RESPONSE_SELECTOR_PROPERTY_NAME = "response_selector"
 DEFAULT_OPEN_UTTERANCE_TYPE = "default"
 OPEN_UTTERANCE_PREDICTION_KEY = "response"
 OPEN_UTTERANCE_RANKING_KEY = "ranking"

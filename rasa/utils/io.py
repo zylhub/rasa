@@ -3,6 +3,7 @@ import errno
 import json
 import logging
 import os
+import pickle
 import tarfile
 import tempfile
 import typing
@@ -11,6 +12,7 @@ import zipfile
 import glob
 from asyncio import AbstractEventLoop
 from io import BytesIO as IOReader
+from pathlib import Path
 from typing import Text, Any, Dict, Union, List, Type, Callable
 
 import ruamel.yaml as yaml
@@ -20,8 +22,10 @@ from rasa.constants import ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL
 if typing.TYPE_CHECKING:
     from prompt_toolkit.validation import Validator
 
+DEFAULT_ENCODING = "utf-8"
 
-def configure_colored_logging(loglevel):
+
+def configure_colored_logging(loglevel: Text) -> None:
     import coloredlogs
 
     loglevel = loglevel or os.environ.get(ENV_LOG_LEVEL, DEFAULT_LOG_LEVEL)
@@ -70,7 +74,7 @@ def fix_yaml_loader() -> None:
     yaml.SafeLoader.add_constructor("tag:yaml.org,2002:str", construct_yaml_str)
 
 
-def replace_environment_variables():
+def replace_environment_variables() -> None:
     """Enable yaml loader to process the environment variables in the yaml."""
     import re
     import os
@@ -126,14 +130,14 @@ def read_yaml(content: Text) -> Union[List[Any], Dict[Text, Any]]:
         return yaml_parser.load(content) or {}
 
 
-def read_file(filename: Text, encoding: Text = "utf-8") -> Any:
+def read_file(filename: Text, encoding: Text = DEFAULT_ENCODING) -> Any:
     """Read text from a file."""
 
     try:
         with open(filename, encoding=encoding) as f:
             return f.read()
     except FileNotFoundError:
-        raise ValueError("File '{}' does not exist.".format(filename))
+        raise ValueError(f"File '{filename}' does not exist.")
 
 
 def read_json_file(filename: Text) -> Any:
@@ -148,13 +152,42 @@ def read_json_file(filename: Text) -> Any:
         )
 
 
+def dump_obj_as_json_to_file(filename: Text, obj: Any) -> None:
+    """Dump an object as a json string to a file."""
+
+    write_text_file(json.dumps(obj, indent=2), filename)
+
+
+def pickle_dump(filename: Union[Text, Path], obj: Any) -> None:
+    """Saves object to file.
+
+    Args:
+        filename: the filename to save the object to
+        obj: the object to store
+    """
+    with open(filename, "wb") as f:
+        pickle.dump(obj, f)
+
+
+def pickle_load(filename: Union[Text, Path]) -> Any:
+    """Loads an object from a file.
+
+    Args:
+        filename: the filename to load the object from
+
+    Returns: the loaded object
+    """
+    with open(filename, "rb") as f:
+        return pickle.load(f)
+
+
 def read_config_file(filename: Text) -> Dict[Text, Any]:
     """Parses a yaml configuration file. Content needs to be a dictionary
 
      Args:
         filename: The path to the file which should be read.
     """
-    content = read_yaml(read_file(filename, "utf-8"))
+    content = read_yaml(read_file(filename))
 
     if content is None:
         return {}
@@ -174,7 +207,7 @@ def read_yaml_file(filename: Text) -> Union[List[Any], Dict[Text, Any]]:
      Args:
         filename: The path to the file which should be read.
     """
-    return read_yaml(read_file(filename, "utf-8"))
+    return read_yaml(read_file(filename, DEFAULT_ENCODING))
 
 
 def unarchive(byte_array: bytes, directory: Text) -> Text:
@@ -194,15 +227,35 @@ def unarchive(byte_array: bytes, directory: Text) -> Text:
         return directory
 
 
-def write_yaml_file(data: Dict, filename: Text):
+def write_yaml_file(data: Dict, filename: Union[Text, Path]) -> None:
     """Writes a yaml file.
 
      Args:
         data: The data to write.
         filename: The path to the file which should be written.
     """
-    with open(filename, "w", encoding="utf-8") as outfile:
-        yaml.dump(data, outfile, default_flow_style=False)
+    with open(str(filename), "w", encoding=DEFAULT_ENCODING) as outfile:
+        yaml.dump(data, outfile, default_flow_style=False, allow_unicode=True)
+
+
+def write_text_file(
+    content: Text,
+    file_path: Union[Text, Path],
+    encoding: Text = DEFAULT_ENCODING,
+    append: bool = False,
+) -> None:
+    """Writes text to a file.
+
+    Args:
+        content: The content to write.
+        file_path: The path to which the content should be written.
+        encoding: The encoding which should be used.
+        append: Whether to append to the file or to truncate the file.
+
+    """
+    mode = "a" if append else "w"
+    with open(file_path, mode, encoding=encoding) as file:
+        file.write(content)
 
 
 def is_subdirectory(path: Text, potential_parent_directory: Text) -> bool:
@@ -220,7 +273,7 @@ def create_temporary_file(data: Any, suffix: Text = "", mode: Text = "w+") -> Te
 
     mode defines NamedTemporaryFile's  mode parameter in py3."""
 
-    encoding = None if "b" in mode else "utf-8"
+    encoding = None if "b" in mode else DEFAULT_ENCODING
     f = tempfile.NamedTemporaryFile(
         mode=mode, suffix=suffix, delete=False, encoding=encoding
     )
@@ -230,7 +283,13 @@ def create_temporary_file(data: Any, suffix: Text = "", mode: Text = "w+") -> Te
     return f.name
 
 
-def create_path(file_path: Text):
+def create_temporary_directory() -> Text:
+    """Creates a tempfile.TemporaryDirectory."""
+    f = tempfile.TemporaryDirectory()
+    return f.name
+
+
+def create_path(file_path: Text) -> None:
     """Makes sure all directories in the 'file_path' exists."""
 
     parent_dir = os.path.dirname(os.path.abspath(file_path))
@@ -238,15 +297,10 @@ def create_path(file_path: Text):
         os.makedirs(parent_dir)
 
 
-def create_directory_for_file(file_path: Text) -> None:
+def create_directory_for_file(file_path: Union[Text, Path]) -> None:
     """Creates any missing parent directories of this file path."""
 
-    try:
-        os.makedirs(os.path.dirname(file_path))
-    except OSError as e:
-        # be happy if someone already created the path
-        if e.errno != errno.EEXIST:
-            raise
+    create_directory(os.path.dirname(file_path))
 
 
 def file_type_validator(
@@ -331,7 +385,7 @@ def list_directory(path: Text) -> List[Text]:
         return [path]
     elif os.path.isdir(path):
         results = []
-        for base, dirs, files in os.walk(path):
+        for base, dirs, files in os.walk(path, followlinks=True):
             # sort files for same order across runs
             files = sorted(files, key=_filename_without_prefix)
             # add not hidden files
@@ -369,4 +423,36 @@ def zip_folder(folder: Text) -> Text:
     zipped_path.close()
 
     # WARN: not thread-safe!
-    return shutil.make_archive(zipped_path.name, str("zip"), folder)
+    return shutil.make_archive(zipped_path.name, "zip", folder)
+
+
+def json_unpickle(file_name: Union[Text, Path]) -> Any:
+    """Unpickle an object from file using json.
+
+    Args:
+        file_name: the file to load the object from
+
+    Returns: the object
+    """
+    import jsonpickle.ext.numpy as jsonpickle_numpy
+    import jsonpickle
+
+    jsonpickle_numpy.register_handlers()
+
+    file_content = read_file(file_name)
+    return jsonpickle.loads(file_content)
+
+
+def json_pickle(file_name: Union[Text, Path], obj: Any) -> None:
+    """Pickle an object to a file using json.
+
+    Args:
+        file_name: the file to store the object to
+        obj: the object to store
+    """
+    import jsonpickle.ext.numpy as jsonpickle_numpy
+    import jsonpickle
+
+    jsonpickle_numpy.register_handlers()
+
+    write_text_file(jsonpickle.dumps(obj), file_name)

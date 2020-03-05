@@ -14,7 +14,7 @@ class RocketChatBot(OutputChannel):
     def name(cls) -> Text:
         return "rocketchat"
 
-    def __init__(self, user, password, server_url):
+    def __init__(self, user, password, server_url) -> None:
         from rocketchat_API.rocketchat import RocketChat
 
         self.rocket = RocketChat(user, password, server_url=server_url)
@@ -36,7 +36,7 @@ class RocketChatBot(OutputChannel):
     ) -> None:
         """Send message to output channel"""
 
-        for message_part in text.split("\n\n"):
+        for message_part in text.strip().split("\n\n"):
             self.rocket.chat_post_message(message_part, room_id=recipient_id)
 
     async def send_image_url(
@@ -60,7 +60,7 @@ class RocketChatBot(OutputChannel):
         recipient_id: Text,
         text: Text,
         buttons: List[Dict[Text, Any]],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         # implementation is based on
         # https://github.com/RocketChat/Rocket.Chat/pull/11473

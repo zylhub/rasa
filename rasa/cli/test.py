@@ -85,7 +85,7 @@ def test_core(args: argparse.Namespace) -> None:
                 stories=stories,
                 endpoints=endpoints,
                 output=output,
-                kwargs=vars(args),
+                additional_arguments=vars(args),
             )
 
     else:
@@ -124,7 +124,7 @@ def test_nlu(args: argparse.Namespace) -> None:
                 config_files.append(file)
             except validation_utils.InvalidYamlFileError:
                 logger.debug(
-                    "Ignoring file '{}' as it is not a valid config file.".format(file)
+                    f"Ignoring file '{file}' as it is not a valid config file."
                 )
                 continue
 

@@ -14,23 +14,10 @@ if typing.TYPE_CHECKING:
     from spacy.tokens.doc import Doc  # pytype: disable=import-error
     from rasa.nlu.model import Metadata
 
-from rasa.nlu.constants import (
-    MESSAGE_RESPONSE_ATTRIBUTE,
-    MESSAGE_INTENT_ATTRIBUTE,
-    MESSAGE_TEXT_ATTRIBUTE,
-    MESSAGE_TOKENS_NAMES,
-    MESSAGE_ATTRIBUTES,
-    MESSAGE_SPACY_FEATURES_NAMES,
-    MESSAGE_VECTOR_FEATURE_NAMES,
-    SPACY_FEATURIZABLE_ATTRIBUTES,
-)
+from rasa.nlu.constants import TEXT, SPACY_DOCS, DENSE_FEATURIZABLE_ATTRIBUTES
 
 
 class SpacyNLP(Component):
-    provides = ["spacy_nlp"] + [
-        MESSAGE_SPACY_FEATURES_NAMES[attribute]
-        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES
-    ]
 
     defaults = {
         # name of the language model to load - if it is not set
@@ -50,7 +37,7 @@ class SpacyNLP(Component):
     ) -> None:
 
         self.nlp = nlp
-        super(SpacyNLP, self).__init__(component_config)
+        super().__init__(component_config)
 
     @staticmethod
     def load_model(spacy_model_name: Text) -> "Language":
@@ -86,9 +73,7 @@ class SpacyNLP(Component):
             spacy_model_name = config.language
             component_config["model"] = config.language
 
-        logger.info(
-            "Trying to load spacy model with name '{}'".format(spacy_model_name)
-        )
+        logger.info(f"Trying to load spacy model with name '{spacy_model_name}'")
 
         nlp = cls.load_model(spacy_model_name)
 
@@ -113,7 +98,7 @@ class SpacyNLP(Component):
 
         return self.nlp(self.preprocess_text(text))
 
-    def preprocess_text(self, text):
+    def preprocess_text(self, text: Optional[Text]) -> Text:
 
         if text is None:
             # converted to empty string so that it can still be passed to spacy.
@@ -125,7 +110,7 @@ class SpacyNLP(Component):
         else:
             return text.lower()
 
-    def get_text(self, example, attribute):
+    def get_text(self, example: Dict[Text, Any], attribute: Text) -> Text:
 
         return self.preprocess_text(example.get(attribute))
 
@@ -198,7 +183,7 @@ class SpacyNLP(Component):
         self, training_data: TrainingData
     ) -> Dict[Text, List[Any]]:
         attribute_docs = {}
-        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES:
+        for attribute in DENSE_FEATURIZABLE_ATTRIBUTES:
             texts = [self.get_text(e, attribute) for e in training_data.intent_examples]
             # Index and freeze indices of the training samples for preserving the order
             # after processing the data.
@@ -230,23 +215,18 @@ class SpacyNLP(Component):
 
         attribute_docs = self.docs_for_training_data(training_data)
 
-        for attribute in SPACY_FEATURIZABLE_ATTRIBUTES:
+        for attribute in DENSE_FEATURIZABLE_ATTRIBUTES:
 
             for idx, example in enumerate(training_data.training_examples):
                 example_attribute_doc = attribute_docs[attribute][idx]
                 if len(example_attribute_doc):
                     # If length is 0, that means the initial text feature was None and was replaced by ''
                     # in preprocess method
-                    example.set(
-                        MESSAGE_SPACY_FEATURES_NAMES[attribute], example_attribute_doc
-                    )
+                    example.set(SPACY_DOCS[attribute], example_attribute_doc)
 
     def process(self, message: Message, **kwargs: Any) -> None:
 
-        message.set(
-            MESSAGE_SPACY_FEATURES_NAMES[MESSAGE_TEXT_ATTRIBUTE],
-            self.doc_for_text(message.text),
-        )
+        message.set(SPACY_DOCS[TEXT], self.doc_for_text(message.text))
 
     @classmethod
     def load(
@@ -255,7 +235,7 @@ class SpacyNLP(Component):
         model_dir: Text = None,
         model_metadata: "Metadata" = None,
         cached_component: Optional["SpacyNLP"] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> "SpacyNLP":
 
         if cached_component:

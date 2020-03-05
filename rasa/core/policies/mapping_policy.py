@@ -4,20 +4,26 @@ import os
 import typing
 from typing import Any, List, Text, Optional
 
+from rasa.constants import DOCS_URL_POLICIES
 import rasa.utils.io
 
-from rasa.core import utils
 from rasa.core.actions.action import (
     ACTION_BACK_NAME,
     ACTION_LISTEN_NAME,
     ACTION_RESTART_NAME,
+    ACTION_SESSION_START_NAME,
 )
-from rasa.core.constants import USER_INTENT_BACK, USER_INTENT_RESTART
+from rasa.core.constants import (
+    USER_INTENT_BACK,
+    USER_INTENT_RESTART,
+    USER_INTENT_SESSION_START,
+)
 from rasa.core.domain import Domain, InvalidDomain
 from rasa.core.events import ActionExecuted
 from rasa.core.policies.policy import Policy
 from rasa.core.trackers import DialogueStateTracker
 from rasa.core.constants import MAPPING_POLICY_PRIORITY
+from rasa.utils.common import raise_warning
 
 if typing.TYPE_CHECKING:
     from rasa.core.policies.ensemble import PolicyEnsemble
@@ -34,13 +40,13 @@ class MappingPolicy(Policy):
     any other policy."""
 
     @staticmethod
-    def _standard_featurizer():
+    def _standard_featurizer() -> None:
         return None
 
     def __init__(self, priority: int = MAPPING_POLICY_PRIORITY) -> None:
         """Create a new Mapping policy."""
 
-        super(MappingPolicy, self).__init__(priority=priority)
+        super().__init__(priority=priority)
 
     @classmethod
     def validate_against_domain(
@@ -70,7 +76,7 @@ class MappingPolicy(Policy):
         self,
         training_trackers: List[DialogueStateTracker],
         domain: Domain,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Does nothing. This policy is deterministic."""
 
@@ -85,12 +91,14 @@ class MappingPolicy(Policy):
         predicted with the highest probability of all policies. If it is not
         the policy will predict zero for every action."""
 
-        prediction = [0.0] * domain.num_actions
+        prediction = self._default_predictions(domain)
         intent = tracker.latest_message.intent.get("name")
         if intent == USER_INTENT_RESTART:
             action = ACTION_RESTART_NAME
         elif intent == USER_INTENT_BACK:
             action = ACTION_BACK_NAME
+        elif intent == USER_INTENT_SESSION_START:
+            action = ACTION_SESSION_START_NAME
         else:
             action = domain.intent_properties.get(intent, {}).get("triggers")
 
@@ -98,9 +106,11 @@ class MappingPolicy(Policy):
             if action:
                 idx = domain.index_for_action(action)
                 if idx is None:
-                    logger.warning(
-                        "MappingPolicy tried to predict unknown "
-                        "action '{}'.".format(action)
+                    raise_warning(
+                        f"MappingPolicy tried to predict unknown "
+                        f"action '{action}'. Make sure all mapped actions are "
+                        f"listed in the domain.",
+                        docs=DOCS_URL_POLICIES + "#mapping-policy",
                     )
                 else:
                     prediction[idx] = 1
@@ -152,7 +162,7 @@ class MappingPolicy(Policy):
         config_file = os.path.join(path, "mapping_policy.json")
         meta = {"priority": self.priority}
         rasa.utils.io.create_directory_for_file(config_file)
-        utils.dump_obj_as_json_to_file(config_file, meta)
+        rasa.utils.io.dump_obj_as_json_to_file(config_file, meta)
 
     @classmethod
     def load(cls, path: Text) -> "MappingPolicy":

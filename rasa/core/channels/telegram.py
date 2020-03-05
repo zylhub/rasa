@@ -27,12 +27,12 @@ class TelegramOutput(Bot, OutputChannel):
         return "telegram"
 
     def __init__(self, access_token: Optional[Text]) -> None:
-        super(TelegramOutput, self).__init__(access_token)
+        super().__init__(access_token)
 
     async def send_text_message(
         self, recipient_id: Text, text: Text, **kwargs: Any
     ) -> None:
-        for message_part in text.split("\n\n"):
+        for message_part in text.strip().split("\n\n"):
             self.send_message(recipient_id, message_part)
 
     async def send_image_url(
@@ -46,7 +46,7 @@ class TelegramOutput(Bot, OutputChannel):
         text: Text,
         buttons: List[Dict[Text, Any]],
         button_type: Optional[Text] = "inline",
-        **kwargs: Any
+        **kwargs: Any,
     ) -> None:
         """Sends a message with keyboard.
 
@@ -167,16 +167,16 @@ class TelegramInput(InputChannel):
         self.debug_mode = debug_mode
 
     @staticmethod
-    def _is_location(message):
-        return message.location
+    def _is_location(message) -> bool:
+        return message.location is not None
 
     @staticmethod
-    def _is_user_message(message):
-        return message.text
+    def _is_user_message(message) -> bool:
+        return message.text is not None
 
     @staticmethod
-    def _is_button(update):
-        return update.callback_query
+    def _is_button(message) -> bool:
+        return message.callback_query is not None
 
     def blueprint(
         self, on_new_message: Callable[[UserMessage], Awaitable[Any]]
@@ -253,9 +253,7 @@ class TelegramInput(InputChannel):
                             )
                         )
                 except Exception as e:
-                    logger.error(
-                        "Exception when trying to handle message.{0}".format(e)
-                    )
+                    logger.error(f"Exception when trying to handle message.{e}")
                     logger.debug(e, exc_info=True)
                     if self.debug_mode:
                         raise
