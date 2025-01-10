@@ -1307,7 +1307,6 @@ jobs:
         with:
           args: "💥 New *Rasa Open Source * version `${{ github.ref_name }}` has been released!"
 
-
   send_slack_notification_for_release_on_failure:
     name: Notify Slack & Publish Release Notes
     runs-on: ubuntu-24.04
