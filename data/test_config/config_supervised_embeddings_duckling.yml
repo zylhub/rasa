@@ -2,7 +2,6 @@ language: "en"
 
 pipeline:
 - name: "CountVectorsFeaturizer"
-- name: "EmbeddingIntentClassifier"
-  epochs: 2
-- name: "DucklingHTTPExtractor"
+- name: "LogisticRegressionClassifier"
+- name: "DucklingEntityExtractor"
   url: "http://duckling:8000"

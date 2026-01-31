@@ -1,3 +1,5 @@
+recipe: default.v1
+assistant_id: form_bot
 language: en
 
 pipeline:
@@ -5,16 +7,17 @@ pipeline:
   - name: LexicalSyntacticFeaturizer
   - name: CountVectorsFeaturizer
     token_pattern: (?u)\b\w+\b
-  - name: DucklingHTTPExtractor
+  - name: DucklingEntityExtractor
     url: http://localhost:8000
     dimensions:
       - number
   - name: DIETClassifier
-    epochs: 100
+    epochs: 1
+    run_eagerly: True
   - name: EntitySynonymMapper
 
 policies:
-  - name: FallbackPolicy
-  - name: MemoizationPolicy
-  - name: FormPolicy
-  - name: MappingPolicy
+  - name: TEDPolicy
+    epochs: 1
+  - name: AugmentedMemoizationPolicy
+  - name: RulePolicy

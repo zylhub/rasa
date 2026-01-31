@@ -1,27 +1,34 @@
+import asyncio
+import json
 import logging
 from copy import deepcopy
 from sanic import Blueprint, response
 from sanic.request import Request
 from sanic.response import HTTPResponse
-from telegram import (
-    Bot,
+from aiogram import Bot
+from aiogram.types import (
     InlineKeyboardButton,
     Update,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    Message,
 )
+from aiogram.utils.exceptions import TelegramAPIError
 from typing import Dict, Text, Any, List, Optional, Callable, Awaitable
 
 from rasa.core.channels.channel import InputChannel, UserMessage, OutputChannel
-from rasa.core.constants import INTENT_MESSAGE_PREFIX, USER_INTENT_RESTART
+from rasa.shared.constants import INTENT_MESSAGE_PREFIX
+from rasa.shared.core.constants import USER_INTENT_RESTART
+from rasa.shared.exceptions import RasaException
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramOutput(Bot, OutputChannel):
-    """Output channel for Telegram"""
+    """Output channel for Telegram."""
 
+    # skipcq: PYL-W0236
     @classmethod
     def name(cls) -> Text:
         return "telegram"
@@ -32,13 +39,15 @@ class TelegramOutput(Bot, OutputChannel):
     async def send_text_message(
         self, recipient_id: Text, text: Text, **kwargs: Any
     ) -> None:
+        """Sends text message."""
         for message_part in text.strip().split("\n\n"):
-            self.send_message(recipient_id, message_part)
+            await self.send_message(recipient_id, message_part)
 
     async def send_image_url(
         self, recipient_id: Text, image: Text, **kwargs: Any
     ) -> None:
-        self.send_photo(recipient_id, image)
+        """Sends an image."""
+        await self.send_photo(recipient_id, image)
 
     async def send_text_with_buttons(
         self,
@@ -59,31 +68,33 @@ class TelegramOutput(Bot, OutputChannel):
         :button_type reply: reply keyboard
         """
         if button_type == "inline":
+            reply_markup = InlineKeyboardMarkup()
             button_list = [
-                [
-                    InlineKeyboardButton(s["title"], callback_data=s["payload"])
-                    for s in buttons
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(button_list)
-
-        elif button_type == "vertical":
-            button_list = [
-                [InlineKeyboardButton(s["title"], callback_data=s["payload"])]
+                InlineKeyboardButton(s["title"], callback_data=s["payload"])
                 for s in buttons
             ]
-            reply_markup = InlineKeyboardMarkup(button_list)
+            reply_markup.row(*button_list)
+
+        elif button_type == "vertical":
+            reply_markup = InlineKeyboardMarkup()
+            [
+                reply_markup.row(
+                    InlineKeyboardButton(s["title"], callback_data=s["payload"])
+                )
+                for s in buttons
+            ]
 
         elif button_type == "reply":
-            button_list = []
-            for bttn in buttons:
-                if isinstance(bttn, list):
-                    button_list.append([KeyboardButton(s["title"]) for s in bttn])
-                else:
-                    button_list.append([KeyboardButton(bttn["title"])])
             reply_markup = ReplyKeyboardMarkup(
-                button_list, resize_keyboard=True, one_time_keyboard=True
+                resize_keyboard=False, one_time_keyboard=True
             )
+            # drop button_type from button_list
+            button_list = [b for b in buttons if b.get("title")]
+            for idx, button in enumerate(buttons):
+                if isinstance(button, list):
+                    reply_markup.add(KeyboardButton(s["title"]) for s in button)
+                else:
+                    reply_markup.add(KeyboardButton(button["title"]))
         else:
             logger.error(
                 "Trying to send text with buttons for unknown "
@@ -91,11 +102,12 @@ class TelegramOutput(Bot, OutputChannel):
             )
             return
 
-        self.send_message(recipient_id, text, reply_markup=reply_markup)
+        await self.send_message(recipient_id, text, reply_markup=reply_markup)
 
     async def send_custom_json(
         self, recipient_id: Text, json_message: Dict[Text, Any], **kwargs: Any
     ) -> None:
+        """Sends a message with a custom json payload."""
         json_message = deepcopy(json_message)
 
         recipient_id = json_message.pop("chat_id", recipient_id)
@@ -131,7 +143,7 @@ class TelegramOutput(Bot, OutputChannel):
             if all(json_message.get(p) is not None for p in params):
                 args = [json_message.pop(p) for p in params]
                 api_call = getattr(self, send_functions[params])
-                api_call(recipient_id, *args, **json_message)
+                await api_call(recipient_id, *args, **json_message)
 
 
 class TelegramInput(InputChannel):
@@ -146,13 +158,11 @@ class TelegramInput(InputChannel):
         if not credentials:
             cls.raise_missing_credentials_exception()
 
-        # pytype: disable=attribute-error
         return cls(
             credentials.get("access_token"),
             credentials.get("verify"),
             credentials.get("webhook_url"),
         )
-        # pytype: enable=attribute-error
 
     def __init__(
         self,
@@ -167,15 +177,19 @@ class TelegramInput(InputChannel):
         self.debug_mode = debug_mode
 
     @staticmethod
-    def _is_location(message) -> bool:
+    def _is_location(message: Message) -> bool:
         return message.location is not None
 
     @staticmethod
-    def _is_user_message(message) -> bool:
+    def _is_user_message(message: Message) -> bool:
         return message.text is not None
 
     @staticmethod
-    def _is_button(message) -> bool:
+    def _is_edited_message(message: Update) -> bool:
+        return message.edited_message is not None
+
+    @staticmethod
+    def _is_button(message: Update) -> bool:
         return message.callback_query is not None
 
     def blueprint(
@@ -190,7 +204,7 @@ class TelegramInput(InputChannel):
 
         @telegram_webhook.route("/set_webhook", methods=["GET", "POST"])
         async def set_webhook(_: Request) -> HTTPResponse:
-            s = out_channel.setWebhook(self.webhook_url)
+            s = await out_channel.set_webhook(self.webhook_url)
             if s:
                 logger.info("Webhook Setup Successful")
                 return response.text("Webhook setup successful")
@@ -202,14 +216,21 @@ class TelegramInput(InputChannel):
         async def message(request: Request) -> Any:
             if request.method == "POST":
 
-                if not out_channel.get_me()["username"] == self.verify:
+                request_dict = request.json
+                if isinstance(request_dict, Text):
+                    request_dict = json.loads(request_dict)
+                update = Update(**request_dict)
+                credentials = await out_channel.get_me()
+                if not credentials.username == self.verify:
                     logger.debug("Invalid access token, check it matches Telegram")
                     return response.text("failed")
 
-                update = Update.de_json(request.json, out_channel)
                 if self._is_button(update):
                     msg = update.callback_query.message
                     text = update.callback_query.data
+                elif self._is_edited_message(update):
+                    msg = update.edited_message
+                    text = update.edited_message.text
                 else:
                     msg = update.message
                     if self._is_user_message(msg):
@@ -264,7 +285,14 @@ class TelegramInput(InputChannel):
         return telegram_webhook
 
     def get_output_channel(self) -> TelegramOutput:
+        """Loads the telegram channel."""
         channel = TelegramOutput(self.access_token)
-        channel.setWebhook(self.webhook_url)
+
+        try:
+            asyncio.run(channel.set_webhook(url=self.webhook_url))
+        except TelegramAPIError as error:
+            raise RasaException(
+                "Failed to set channel webhook: " + str(error)
+            ) from error
 
         return channel

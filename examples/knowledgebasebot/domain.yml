@@ -1,3 +1,5 @@
+version: "3.1"
+
 intents:
   - greet
   - goodbye
@@ -15,19 +17,47 @@ entities:
 
 slots:
   object_type:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: object_type
   mention:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: mention
   attribute:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: attribute
   hotel:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: hotel
   restaurant:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: restaurant
   city:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: city
   cuisine:
-    type: unfeaturized
+    type: text
+    influence_conversation: false
+    mappings:
+    - type: from_entity
+      entity: cuisine
 
 actions:
 - action_query_knowledge_base

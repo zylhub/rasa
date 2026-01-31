@@ -2,39 +2,39 @@ import logging
 import os
 from typing import Text
 
-from rasa.cli.utils import print_error
-
-from rasa.core.domain import InvalidDomain
+from rasa import telemetry
+from rasa.shared.core.training_data import loading
+from rasa.shared.utils.cli import print_error
+from rasa.shared.core.domain import InvalidDomain, Domain
 
 logger = logging.getLogger(__name__)
 
 
-async def visualize(
-    config_path: Text,
+def visualize(
     domain_path: Text,
     stories_path: Text,
     nlu_data_path: Text,
     output_path: Text,
     max_history: int,
-):
-    from rasa.core.agent import Agent
-    from rasa.core import config
+) -> None:
+    """Visualizes stories as graph.
+
+    Args:
+        domain_path: Path to the domain file.
+        stories_path: Path to the stories files.
+        nlu_data_path: Path to the NLU training data which can be used to interpolate
+            intents with actual examples in the graph.
+        output_path: Path where the created graph should be persisted.
+        max_history: Max history to use for the story visualization.
+    """
+    import rasa.shared.core.training_data.visualization
 
     try:
-        policies = config.load(config_path)
-    except ValueError as e:
-        print_error(
-            "Could not load config due to: '{}'. To specify a valid config file use "
-            "the '--config' argument.".format(e)
-        )
-        return
-
-    try:
-        agent = Agent(domain=domain_path, policies=policies)
+        domain = Domain.load(domain_path)
     except InvalidDomain as e:
         print_error(
-            "Could not load domain due to: '{}'. To specify a valid domain path use "
-            "the '--domain' argument.".format(e)
+            f"Could not load domain due to: '{e}'. To specify a valid domain path use "
+            f"the '--domain' argument."
         )
         return
 
@@ -42,15 +42,24 @@ async def visualize(
     # messages in the stories should be replaced with actual
     # messages (e.g. `hello`)
     if nlu_data_path is not None:
-        from rasa.nlu.training_data import load_data
+        import rasa.shared.nlu.training_data.loading
 
-        nlu_data_path = load_data(nlu_data_path)
+        nlu_training_data = rasa.shared.nlu.training_data.loading.load_data(
+            nlu_data_path
+        )
     else:
-        nlu_data_path = None
+        nlu_training_data = None
 
     logger.info("Starting to visualize stories...")
-    await agent.visualize(
-        stories_path, output_path, max_history, nlu_training_data=nlu_data_path
+    telemetry.track_visualization()
+
+    story_steps = loading.load_data_from_resource(stories_path, domain)
+    rasa.shared.core.training_data.visualization.visualize_stories(
+        story_steps,
+        domain,
+        output_path,
+        max_history,
+        nlu_training_data=nlu_training_data,
     )
 
     full_output_path = "file://{}".format(os.path.abspath(output_path))
@@ -59,11 +68,3 @@ async def visualize(
     import webbrowser
 
     webbrowser.open(full_output_path)
-
-
-if __name__ == "__main__":
-    raise RuntimeError(
-        "Calling `rasa.core.visualize` directly is "
-        "no longer supported. "
-        "Please use `rasa visualize` instead."
-    )

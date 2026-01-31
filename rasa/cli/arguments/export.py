@@ -1,7 +1,7 @@
 import argparse
 
 from rasa.cli.arguments import default_arguments
-from rasa.constants import DEFAULT_ENDPOINTS_PATH
+from rasa.shared.constants import DEFAULT_ENDPOINTS_PATH
 
 
 def set_export_arguments(parser: argparse.ArgumentParser) -> None:
@@ -29,6 +29,16 @@ def set_export_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Maximum timestamp of events to be exported. The constraint is "
             "applied in a 'less than' comparison."
+        ),
+    )
+
+    parser.add_argument(
+        "--offset-timestamps-by-seconds",
+        type=int,
+        help=(
+            "Offset all event timestamps by the specified amount of seconds. "
+            "This won't modify the stored events in the tracker store, but only "
+            "change the timestamps in the events exported to the broker."
         ),
     )
 

@@ -1,324 +1,222 @@
-from typing import List
-
+from rasa.shared.exceptions import InvalidConfigException
 import pytest
-import copy
+import itertools
+from typing import List, Tuple
 
-from rasa.core.policies.fallback import FallbackPolicy
-from rasa.core.policies.form_policy import FormPolicy
-from rasa.core.policies.policy import Policy
-from rasa.core.policies.ensemble import (
-    PolicyEnsemble,
-    InvalidPolicyConfig,
-    SimplePolicyEnsemble,
-)
-from rasa.core.domain import Domain
-from rasa.core.trackers import DialogueStateTracker
-from rasa.core.events import UserUttered, Form, Event
-
-from tests.core import utilities
-from rasa.core.actions.action import (
-    ACTION_DEFAULT_FALLBACK_NAME,
-    ACTION_RESTART_NAME,
-    ACTION_LISTEN_NAME,
-)
-from rasa.core.constants import USER_INTENT_RESTART, FORM_POLICY_PRIORITY
-from rasa.core.events import ActionExecuted
-from rasa.core.policies.two_stage_fallback import TwoStageFallbackPolicy
-from rasa.core.policies.mapping_policy import MappingPolicy
+from rasa.engine.graph import ExecutionContext
+from rasa.engine.storage.resource import Resource
+from rasa.engine.storage.storage import ModelStorage
+from rasa.core.policies.policy import PolicyPrediction
+from rasa.core.policies.ensemble import DefaultPolicyPredictionEnsemble
+from rasa.shared.core.domain import Domain
+from rasa.shared.core.trackers import DialogueStateTracker
+from rasa.shared.core.events import ActionExecutionRejected, UserUttered
+from rasa.shared.core.events import ActionExecuted, DefinePrevUserUtteredFeaturization
+from rasa.shared.core.constants import ACTION_LISTEN_NAME
 
 
-class WorkingPolicy(Policy):
-    @classmethod
-    def load(cls, path):
-        return WorkingPolicy()
-
-    def persist(self, path):
-        pass
-
-    def train(self, training_trackers, domain, **kwargs):
-        pass
-
-    def predict_action_probabilities(self, tracker, domain):
-        pass
-
-    def __eq__(self, other):
-        return isinstance(other, WorkingPolicy)
+@pytest.fixture
+def default_ensemble(
+    default_model_storage: ModelStorage, default_execution_context: ExecutionContext
+) -> DefaultPolicyPredictionEnsemble:
+    return DefaultPolicyPredictionEnsemble.create(
+        config=DefaultPolicyPredictionEnsemble.get_default_config(),
+        model_storage=default_model_storage,
+        resource=Resource("ensemble"),
+        execution_context=default_execution_context,
+    )
 
 
-def test_policy_loading_simple(tmpdir):
-    original_policy_ensemble = PolicyEnsemble([WorkingPolicy()])
-    original_policy_ensemble.train([], None)
-    original_policy_ensemble.persist(str(tmpdir))
-
-    loaded_policy_ensemble = PolicyEnsemble.load(str(tmpdir))
-    assert original_policy_ensemble.policies == loaded_policy_ensemble.policies
-
-
-class ConstantPolicy(Policy):
-    def __init__(self, priority: int = None, predict_index: int = None) -> None:
-        super().__init__(priority=priority)
-        self.predict_index = predict_index
-
-    @classmethod
-    def load(cls, path):
-        pass
-
-    def persist(self, path):
-        pass
-
-    def train(self, training_trackers, domain, **kwargs):
-        pass
-
-    def predict_action_probabilities(self, tracker, domain):
-        result = [0.0] * domain.num_actions
-        result[self.predict_index] = 1.0
-        return result
-
-
-def test_policy_priority():
+def test_default_predict_complains_if_no_predictions_given(
+    default_ensemble: DefaultPolicyPredictionEnsemble,
+):
     domain = Domain.load("data/test_domains/default.yml")
-    tracker = DialogueStateTracker.from_events("test", [UserUttered("hi")], [])
-
-    priority_1 = ConstantPolicy(priority=1, predict_index=0)
-    priority_2 = ConstantPolicy(priority=2, predict_index=1)
-
-    policy_ensemble_0 = SimplePolicyEnsemble([priority_1, priority_2])
-    policy_ensemble_1 = SimplePolicyEnsemble([priority_2, priority_1])
-
-    priority_2_result = priority_2.predict_action_probabilities(tracker, domain)
-
-    i = 1  # index of priority_2 in ensemble_0
-    result, best_policy = policy_ensemble_0.probabilities_using_best_policy(
-        tracker, domain
-    )
-    assert best_policy == "policy_{}_{}".format(i, type(priority_2).__name__)
-    assert result == priority_2_result
-
-    i = 0  # index of priority_2 in ensemble_1
-    result, best_policy = policy_ensemble_1.probabilities_using_best_policy(
-        tracker, domain
-    )
-    assert best_policy == "policy_{}_{}".format(i, type(priority_2).__name__)
-    assert result == priority_2_result
+    tracker = DialogueStateTracker.from_events(sender_id="arbitrary", evts=[])
+    with pytest.raises(InvalidConfigException):
+        default_ensemble.combine_predictions_from_kwargs(domain=domain, tracker=tracker)
 
 
-def test_fallback_mapping_restart():
+def test_default_predict_ignores_other_kwargs(
+    default_ensemble: DefaultPolicyPredictionEnsemble,
+):
     domain = Domain.load("data/test_domains/default.yml")
-    events = [
-        ActionExecuted(ACTION_DEFAULT_FALLBACK_NAME),
-        utilities.user_uttered(USER_INTENT_RESTART, 1),
-    ]
-    tracker = DialogueStateTracker.from_events("test", events, [])
-
-    two_stage_fallback_policy = TwoStageFallbackPolicy(
-        priority=2, deny_suggestion_intent_name="deny"
-    )
-    mapping_policy = MappingPolicy(priority=1)
-
-    mapping_fallback_ensemble = SimplePolicyEnsemble(
-        [two_stage_fallback_policy, mapping_policy]
+    tracker = DialogueStateTracker.from_events(sender_id="arbitrary", evts=[])
+    prediction = PolicyPrediction(
+        policy_name="arbitrary", probabilities=[1.0], policy_priority=1
     )
 
-    result, best_policy = mapping_fallback_ensemble.probabilities_using_best_policy(
-        tracker, domain
+    final_prediction = default_ensemble.combine_predictions_from_kwargs(
+        domain=domain,
+        tracker=tracker,
+        **{
+            "policy-graph-component-1": prediction,
+            "another-random-component": domain,
+            "yet-another-component": tracker,
+        },
     )
-    max_confidence_index = result.index(max(result))
-    index_of_mapping_policy = 1
-    next_action = domain.action_for_index(max_confidence_index, None)
-
-    assert best_policy == f"policy_{index_of_mapping_policy}_{MappingPolicy.__name__}"
-    assert next_action.name() == ACTION_RESTART_NAME
+    assert final_prediction.policy_name == prediction.policy_name
 
 
-@pytest.mark.parametrize(
-    "events",
-    [
-        [
-            Form("test-form"),
-            ActionExecuted(ACTION_LISTEN_NAME),
-            utilities.user_uttered(USER_INTENT_RESTART, 1),
+def test_default_predict_excludes_rejected_action(
+    default_ensemble: DefaultPolicyPredictionEnsemble,
+):
+    domain = Domain.load("data/test_domains/default.yml")
+    excluded_action = domain.action_names_or_texts[0]
+    tracker = DialogueStateTracker.from_events(
+        sender_id="arbitrary",
+        evts=[
+            UserUttered("hi"),
+            ActionExecuted(excluded_action),
+            ActionExecutionRejected(excluded_action),  # not "Rejection"
         ],
-        [
-            ActionExecuted(ACTION_LISTEN_NAME),
-            utilities.user_uttered(USER_INTENT_RESTART, 1),
-        ],
-    ],
-)
-def test_mapping_wins_over_form(events: List[Event]):
-    domain = """
-    forms:
-    - test-form
-    """
-    domain = Domain.from_yaml(domain)
-    tracker = DialogueStateTracker.from_events("test", events, [])
-
-    ensemble = SimplePolicyEnsemble(
-        [
-            MappingPolicy(),
-            ConstantPolicy(priority=1, predict_index=0),
-            FormPolicy(),
-            FallbackPolicy(),
-        ]
     )
-
-    result, best_policy = ensemble.probabilities_using_best_policy(tracker, domain)
-
-    max_confidence_index = result.index(max(result))
-    next_action = domain.action_for_index(max_confidence_index, None)
-
-    index_of_mapping_policy = 0
-    assert best_policy == f"policy_{index_of_mapping_policy}_{MappingPolicy.__name__}"
-    assert next_action.name() == ACTION_RESTART_NAME
-
-
-@pytest.mark.parametrize(
-    "ensemble",
-    [
-        SimplePolicyEnsemble(
-            [
-                FormPolicy(),
-                ConstantPolicy(FORM_POLICY_PRIORITY - 1, 0),
-                FallbackPolicy(),
-            ]
-        ),
-        SimplePolicyEnsemble([FormPolicy(), MappingPolicy()]),
-    ],
-)
-def test_form_wins_over_everything_else(ensemble: SimplePolicyEnsemble):
-    form_name = "test-form"
-    domain = f"""
-    forms:
-    - {form_name}
-    """
-    domain = Domain.from_yaml(domain)
-
-    events = [
-        Form("test-form"),
-        ActionExecuted(ACTION_LISTEN_NAME),
-        utilities.user_uttered("test", 1),
+    num_actions = len(domain.action_names_or_texts)
+    predictions = [
+        PolicyPrediction(
+            policy_name=str(idx), probabilities=[1.0] * num_actions, policy_priority=idx
+        )
+        for idx in range(2)
     ]
-    tracker = DialogueStateTracker.from_events("test", events, [])
-    result, best_policy = ensemble.probabilities_using_best_policy(tracker, domain)
-
-    max_confidence_index = result.index(max(result))
-    next_action = domain.action_for_index(max_confidence_index, None)
-
-    index_of_form_policy = 0
-    assert best_policy == f"policy_{index_of_form_policy}_{FormPolicy.__name__}"
-    assert next_action.name() == form_name
-
-
-def test_fallback_wins_over_mapping():
-    domain = Domain.load("data/test_domains/default.yml")
-    events = [
-        ActionExecuted(ACTION_LISTEN_NAME),
-        # Low confidence should trigger fallback
-        utilities.user_uttered(USER_INTENT_RESTART, 0.0001),
-    ]
-    tracker = DialogueStateTracker.from_events("test", events, [])
-
-    ensemble = SimplePolicyEnsemble([FallbackPolicy(), MappingPolicy()])
-
-    result, best_policy = ensemble.probabilities_using_best_policy(tracker, domain)
-    max_confidence_index = result.index(max(result))
-    index_of_fallback_policy = 0
-    next_action = domain.action_for_index(max_confidence_index, None)
-
-    assert best_policy == f"policy_{index_of_fallback_policy}_{FallbackPolicy.__name__}"
-    assert next_action.name() == ACTION_DEFAULT_FALLBACK_NAME
-
-
-class LoadReturnsNonePolicy(Policy):
-    @classmethod
-    def load(cls, path):
-        return None
-
-    def persist(self, path):
-        pass
-
-    def train(self, training_trackers, domain, **kwargs):
-        pass
-
-    def predict_action_probabilities(self, tracker, domain):
-        pass
-
-
-def test_policy_loading_load_returns_none(tmpdir):
-    original_policy_ensemble = PolicyEnsemble([LoadReturnsNonePolicy()])
-    original_policy_ensemble.train([], None)
-    original_policy_ensemble.persist(str(tmpdir))
-
-    with pytest.raises(Exception):
-        PolicyEnsemble.load(str(tmpdir))
-
-
-class LoadReturnsWrongTypePolicy(Policy):
-    @classmethod
-    def load(cls, path):
-        return ""
-
-    def persist(self, path):
-        pass
-
-    def train(self, training_trackers, domain, **kwargs):
-        pass
-
-    def predict_action_probabilities(self, tracker, domain):
-        pass
-
-
-def test_policy_loading_load_returns_wrong_type(tmpdir):
-    original_policy_ensemble = PolicyEnsemble([LoadReturnsWrongTypePolicy()])
-    original_policy_ensemble.train([], None)
-    original_policy_ensemble.persist(str(tmpdir))
-
-    with pytest.raises(Exception):
-        PolicyEnsemble.load(str(tmpdir))
+    index_of_excluded_action = domain.index_for_action(excluded_action)
+    prediction = default_ensemble.combine_predictions_from_kwargs(
+        domain=domain,
+        tracker=tracker,
+        **{prediction.policy_name: prediction for prediction in predictions},
+    )
+    assert prediction.probabilities[index_of_excluded_action] == 0.0
 
 
 @pytest.mark.parametrize(
-    "valid_config",
-    [
-        {"policy": [{"name": "MemoizationPolicy"}]},
-        {"policies": [{"name": "MemoizationPolicy"}]},
-    ],
-)
-def test_valid_policy_configurations(valid_config):
-    assert PolicyEnsemble.from_dict(valid_config)
-
-
-@pytest.mark.parametrize(
-    "invalid_config",
-    [
-        {"police": [{"name": "MemoizationPolicy"}]},
-        {"policies": []},
-        {"policies": [{"name": "ykaüoppodas"}]},
-        {"policy": [{"name": "ykaüoppodas"}]},
-        {"policy": [{"name": "ykaüoppodas.bladibla"}]},
-    ],
-)
-def test_invalid_policy_configurations(invalid_config):
-    with pytest.raises(InvalidPolicyConfig):
-        PolicyEnsemble.from_dict(invalid_config)
-
-
-def test_from_dict_does_not_change_passed_dict_parameter():
-    config = {
-        "policies": [
-            {
-                "name": "KerasPolicy",
-                "featurizer": [
-                    {
-                        "name": "MaxHistoryTrackerFeaturizer",
-                        "max_history": 5,
-                        "state_featurizer": [{"name": "BinarySingleStateFeaturizer"}],
-                    }
+    "predictions_and_expected_winner_idx, last_action_was_action_listen",
+    itertools.product(
+        [
+            (
+                # highest probability and highest priority
+                [
+                    PolicyPrediction(
+                        policy_name=str(idx),
+                        probabilities=[idx] * 3,
+                        policy_priority=idx,
+                    )
+                    for idx in range(4)
                 ],
-            }
+                3,
+            ),
+            (
+                # highest probability wins even if priority is low
+                [
+                    PolicyPrediction(
+                        policy_name=str(idx),
+                        probabilities=[idx] * 3,
+                        policy_priority=idx,
+                    )
+                    for idx in reversed(range(4))
+                ],
+                0,
+            ),
+            (
+                # "end to end" prediction supersedes others
+                [
+                    PolicyPrediction(
+                        policy_name="policy using user text but max prob 0.0 wins",
+                        probabilities=[0.0],
+                        policy_priority=0,
+                        is_end_to_end_prediction=True,
+                    ),
+                    PolicyPrediction(
+                        policy_name="policy not using user text but max prob 1.0",
+                        probabilities=[1.0],
+                        policy_priority=1,
+                        is_end_to_end_prediction=False,
+                    ),
+                ],
+                0,
+            ),
+            (
+                # "no user" prediction supsersedes even the end to end ones
+                [
+                    PolicyPrediction(
+                        policy_name="'no user' with smallest max. prob",
+                        probabilities=[0.0],
+                        policy_priority=0,
+                        is_no_user_prediction=True,
+                    ),
+                    PolicyPrediction(
+                        policy_name="'end2end' with higher prob and priority",
+                        probabilities=[1.0],
+                        policy_priority=1,
+                        is_end_to_end_prediction=True,
+                    ),
+                    PolicyPrediction(
+                        policy_name="highest prob and highest priority",
+                        probabilities=[2.0],
+                        policy_priority=2,
+                    ),
+                ],
+                0,
+            ),
+        ],
+        [True, False],
+    ),
+)
+def test_default_combine_predictions(
+    default_ensemble: DefaultPolicyPredictionEnsemble,
+    predictions_and_expected_winner_idx: Tuple[List[PolicyPrediction], int],
+    last_action_was_action_listen: bool,
+):
+    domain = Domain.load("data/test_domains/default.yml")
+    predictions, expected_winner_idx = predictions_and_expected_winner_idx
+
+    # add mandatory and optional events to every prediction
+    for prediction in predictions:
+        prediction.events = [ActionExecuted(action_name=prediction.policy_name)]
+        prediction.optional_events = [
+            ActionExecuted(action_name=f"optional-{prediction.policy_name}")
         ]
-    }
 
-    config_copy = copy.deepcopy(config)
-    PolicyEnsemble.from_dict(config_copy)
+    # expected events
+    expected_events = set(
+        event for prediction in predictions for event in prediction.events
+    )
+    expected_events.update(predictions[expected_winner_idx].optional_events)
+    if last_action_was_action_listen:
+        expected_events.add(
+            DefinePrevUserUtteredFeaturization(
+                predictions[expected_winner_idx].is_end_to_end_prediction
+            )
+        )
 
-    assert config == config_copy
+    # construct tracker
+    evts = (
+        [ActionExecuted(action_name=ACTION_LISTEN_NAME)]
+        if last_action_was_action_listen
+        else []
+    )
+    tracker = DialogueStateTracker.from_events(sender_id="arbitrary", evts=evts)
+
+    # get the best prediction!
+    best_prediction = default_ensemble.combine_predictions_from_kwargs(
+        tracker,
+        domain=domain,
+        **{prediction.policy_name: prediction for prediction in predictions},
+    )
+
+    # compare events first ...
+    assert set(best_prediction.events) == expected_events
+    assert not best_prediction.optional_events
+
+    # ... then drop events and compare the rest
+    best_prediction.events = []
+    best_prediction.optional_events = []
+    predictions[expected_winner_idx].events = []
+    predictions[expected_winner_idx].optional_events = []
+
+    # ... not quite there yet, because old implementation creates a policy with
+    # best_policy.priority as priority and the first one is a tuple which then
+    # becomes a tuple with a tuple with an int, so...
+    predictions[expected_winner_idx].policy_priority = predictions[
+        expected_winner_idx
+    ].policy_priority
+
+    # now, we can compare:
+    assert best_prediction == predictions[expected_winner_idx]

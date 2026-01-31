@@ -1,20 +1,22 @@
-from rasa.nlu.config import RasaNLUModelConfig
-from rasa.nlu.training_data import Message
+from rasa.nlu.extractors.spacy_entity_extractor import SpacyEntityExtractor
+from rasa.nlu.utils.spacy_utils import SpacyModel
+from rasa.shared.nlu.constants import TEXT
+from rasa.shared.nlu.training_data.message import Message
 
 
-def test_spacy_ner_extractor(component_builder, spacy_nlp):
-    _config = RasaNLUModelConfig({"pipeline": [{"name": "SpacyEntityExtractor"}]})
-    ext = component_builder.create_component(_config.for_component(0), _config)
+def test_spacy_ner_extractor(spacy_nlp):
     example = Message(
-        "anywhere in the U.K.",
-        {
+        data={
+            TEXT: "anywhere in the U.K.",
             "intent": "restaurant_search",
             "entities": [],
             "text_spacy_doc": spacy_nlp("anywhere in the west"),
-        },
+        }
     )
 
-    ext.process(example, spacy_nlp=spacy_nlp)
+    component = SpacyEntityExtractor(SpacyEntityExtractor.get_default_config())
+
+    component.process([example], model=SpacyModel(model=spacy_nlp, model_name=""))
 
     assert len(example.get("entities", [])) == 1
     assert example.get("entities")[0] == {
@@ -27,20 +29,17 @@ def test_spacy_ner_extractor(component_builder, spacy_nlp):
     }
 
     # Test dimension filtering includes only specified dimensions
-
     example = Message(
-        "anywhere in the West with Sebastian Thrun",
-        {
+        data={
+            TEXT: "anywhere in the West with Sebastian Thrun",
             "intent": "example_intent",
             "entities": [],
             "text_spacy_doc": spacy_nlp("anywhere in the West with Sebastian Thrun"),
-        },
+        }
     )
-    _config = RasaNLUModelConfig({"pipeline": [{"name": "SpacyEntityExtractor"}]})
 
-    _config.set_component_attr(0, dimensions=["PERSON"])
-    ext = component_builder.create_component(_config.for_component(0), _config)
-    ext.process(example, spacy_nlp=spacy_nlp)
+    component = SpacyEntityExtractor({"dimensions": ["PERSON"]})
+    component.process([example], model=SpacyModel(model=spacy_nlp, model_name=""))
 
     assert len(example.get("entities", [])) == 1
     assert example.get("entities")[0] == {

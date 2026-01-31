@@ -1,98 +1,89 @@
-import numpy as np
-import scipy.sparse
-from typing import Any, Text, Union, Optional
+from __future__ import annotations
+from abc import abstractmethod, ABC
+from collections import Counter
+from typing import Generic, Iterable, Text, Optional, Dict, Any, TypeVar
 
-from rasa.nlu.training_data import Message
-from rasa.nlu.components import Component
-from rasa.nlu.constants import SPARSE_FEATURE_NAMES, DENSE_FEATURE_NAMES, TEXT
-from rasa.utils.tensorflow.constants import MEAN_POOLING, MAX_POOLING
+from rasa.nlu.constants import FEATURIZER_CLASS_ALIAS
+from rasa.shared.nlu.training_data.features import Features
+from rasa.shared.nlu.training_data.message import Message
+from rasa.shared.exceptions import InvalidConfigException
+from rasa.shared.nlu.constants import FEATURE_TYPE_SENTENCE, FEATURE_TYPE_SEQUENCE
 
-
-def sequence_to_sentence_features(
-    features: Union[np.ndarray, scipy.sparse.spmatrix]
-) -> Optional[Union[np.ndarray, scipy.sparse.spmatrix]]:
-    """Extract the CLS token vector as sentence features.
-
-    Features is a sequence. The last token is the CLS token. The feature vector of
-    this token contains the sentence features."""
-
-    if features is None:
-        return None
-
-    if isinstance(features, scipy.sparse.spmatrix):
-        return scipy.sparse.coo_matrix(features.tocsr()[-1])
-
-    return np.expand_dims(features[-1], axis=0)
+FeatureType = TypeVar("FeatureType")
 
 
-class Featurizer(Component):
-    pass
+class Featurizer(Generic[FeatureType], ABC):
+    """Base class for all featurizers."""
 
-
-class DenseFeaturizer(Featurizer):
     @staticmethod
-    def _combine_with_existing_dense_features(
+    def get_default_config() -> Dict[Text, Any]:
+        """Returns the component's default config."""
+        return {FEATURIZER_CLASS_ALIAS: None}
+
+    def __init__(self, name: Text, config: Dict[Text, Any]) -> None:
+        """Instantiates a new featurizer.
+
+        Args:
+          config: configuration
+          name: a name that can be used as identifier, in case the configuration does
+            not specify an `alias` (or this `alias` is None)
+        """
+        super().__init__()
+        self.validate_config(config)
+        self._config = config
+        self._identifier = self._config[FEATURIZER_CLASS_ALIAS] or name
+
+    @classmethod
+    @abstractmethod
+    def validate_config(cls, config: Dict[Text, Any]) -> None:
+        """Validates that the component is configured properly."""
+        ...
+
+    def add_features_to_message(
+        self,
+        sequence: FeatureType,
+        sentence: Optional[FeatureType],
+        attribute: Text,
         message: Message,
-        additional_features: Any,
-        feature_name: Text = DENSE_FEATURE_NAMES[TEXT],
-    ) -> Any:
-        if message.get(feature_name) is not None:
+    ) -> None:
+        """Adds sequence and sentence features for the attribute to the given message.
 
-            if len(message.get(feature_name)) != len(additional_features):
-                raise ValueError(
-                    f"Cannot concatenate dense features as sequence dimension does not "
-                    f"match: {len(message.get(feature_name))} != "
-                    f"{len(additional_features)}. Message: '{message.text}'."
-                )
-
-            return np.concatenate(
-                (message.get(feature_name), additional_features), axis=-1
-            )
-        else:
-            return additional_features
+        Args:
+          sequence: sequence feature matrix
+          sentence: sentence feature matrix
+          attribute: the attribute which both features describe
+          message: the message to which we want to add those features
+        """
+        for type, features in [
+            (FEATURE_TYPE_SEQUENCE, sequence),
+            (FEATURE_TYPE_SENTENCE, sentence),
+        ]:
+            if features is not None:
+                wrapped_feature = Features(features, type, attribute, self._identifier)
+                message.add_features(wrapped_feature)
 
     @staticmethod
-    def _calculate_cls_vector(
-        features: np.ndarray, pooling_operation: Text
-    ) -> np.ndarray:
-        # take only non zeros feature vectors into account
-        non_zero_features = np.array([f for f in features if f.any()])
+    def raise_if_featurizer_configs_are_not_compatible(
+        featurizer_configs: Iterable[Dict[Text, Any]]
+    ) -> None:
+        """Validates that the given configurations of featurizers can be used together.
 
-        # if features are all zero just return a vector with all zeros
-        if non_zero_features.size == 0:
-            return np.zeros([1, features.shape[-1]])
-
-        if pooling_operation == MEAN_POOLING:
-            return np.mean(non_zero_features, axis=0, keepdims=True)
-        elif pooling_operation == MAX_POOLING:
-            return np.max(non_zero_features, axis=0, keepdims=True)
-        else:
-            raise ValueError(
-                f"Invalid pooling operation specified. Available operations are "
-                f"'{MEAN_POOLING}' or '{MAX_POOLING}', but provided value is "
-                f"'{pooling_operation}'."
-            )
-
-
-class SparseFeaturizer(Featurizer):
-    @staticmethod
-    def _combine_with_existing_sparse_features(
-        message: Message,
-        additional_features: Any,
-        feature_name: Text = SPARSE_FEATURE_NAMES[TEXT],
-    ) -> Any:
-        if additional_features is None:
+        Raises:
+          `InvalidConfigException` if the given featurizers should not be used in
+            the same graph.
+        """
+        # NOTE: this assumes the names given via the execution context are unique
+        alias_counter = Counter(
+            config[FEATURIZER_CLASS_ALIAS]
+            for config in featurizer_configs
+            if FEATURIZER_CLASS_ALIAS in config
+        )
+        if not alias_counter:  # no alias found
             return
-
-        if message.get(feature_name) is not None:
-            from scipy.sparse import hstack
-
-            if message.get(feature_name).shape[0] != additional_features.shape[0]:
-                raise ValueError(
-                    f"Cannot concatenate sparse features as sequence dimension does not "
-                    f"match: {message.get(feature_name).shape[0]} != "
-                    f"{additional_features.shape[0]}. Message: '{message.text}'."
-                )
-            return hstack([message.get(feature_name), additional_features])
-        else:
-            return additional_features
+        if alias_counter.most_common(1)[0][1] > 1:
+            raise InvalidConfigException(
+                f"Expected the featurizers to have unique names but found "
+                f" (name, count): {alias_counter.most_common()}. "
+                f"Please update your config such that each featurizer has a unique "
+                f"alias."
+            )

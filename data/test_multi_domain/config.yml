@@ -1,10 +1,12 @@
+recipe: default.v1
+assistant_id: placeholder_default
 language: en
 
-pipeline: "pretrained_embeddings_spacy"
+pipeline:
+  - name: "KeywordIntentClassifier"
 
 policies:
   - name: MemoizationPolicy
-  - name: KerasPolicy
 
 importers:
   - name: MultiProjectImporter

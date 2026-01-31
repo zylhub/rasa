@@ -13,12 +13,11 @@ ENTER = "\x0a"
 
 
 def mock_stdin(input_from_stdin: List[Text]):
-    inp = create_pipe_input()
-
     text = ""
     for line in input_from_stdin:
         text += line + ENTER + "\r"
 
+    inp = create_pipe_input()
     inp.send_text(text)
 
     prompt_session_init = PromptSession.__init__
@@ -90,9 +89,7 @@ async def test_record_messages(monkeypatch: MonkeyPatch, capsys: CaptureFixture)
 
         for output in [m["out"] for m in input_output]:
             if output:
-                mocked.post(
-                    url=endpoint, payload=output,
-                )
+                mocked.post(url=endpoint, payload=output)
 
         num_of_messages = await record_messages(
             "123",

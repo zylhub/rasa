@@ -8,13 +8,13 @@ def cleanup_tokens(
     """Utility method to apply delimiter based cleanup on list of tokens.
 
     Args:
-        token_ids_string: List of tuples with each tuple containing (token id, token string).
+        token_ids_string: List of tuples with each tuple containing
+            (token id, token string).
         delimiter: character/string to be cleaned from token strings.
 
     Returns:
         Token ids and Token strings unpacked.
     """
-
     token_ids_string = [
         (id, string.replace(delimiter, "")) for id, string in token_ids_string
     ]
@@ -24,7 +24,8 @@ def cleanup_tokens(
 
     # return as individual token ids and token strings
     token_ids, token_strings = zip(*token_ids_string)
-    return token_ids, token_strings
+    # FIXME: zip official typing is not really properly set up
+    return token_ids, token_strings  # type: ignore[return-value]
 
 
 def bert_tokens_pre_processor(token_ids: List[int]) -> List[int]:
@@ -113,6 +114,24 @@ def xlm_tokens_pre_processor(token_ids: List[int]) -> List[int]:
     return token_ids
 
 
+def camembert_tokens_pre_processor(token_ids: List[int]) -> List[int]:
+    """Add camembert style special tokens.
+
+    Args:
+        token_ids: List of token ids without any special tokens.
+
+    Returns:
+        List of token ids augmented with special tokens.
+    """
+    CAMEMBERT_BEG_ID = 5
+    CAMEMBERT_END_ID = 6
+
+    token_ids.insert(0, CAMEMBERT_BEG_ID)
+    token_ids.append(CAMEMBERT_END_ID)
+
+    return token_ids
+
+
 def bert_embeddings_post_processor(
     sequence_embeddings: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -122,7 +141,8 @@ def bert_embeddings_post_processor(
     sentence representation.
 
     Args:
-        sequence_embeddings: Sequence of token level embeddings received as output from BERT.
+        sequence_embeddings: Sequence of token level embeddings received as output from
+            BERT.
 
     Returns:
         sentence level embedding and post-processed sequence level embedding.
@@ -142,7 +162,8 @@ def gpt_embeddings_post_processor(
     representation.
 
     Args:
-        sequence_embeddings: Sequence of token level embeddings received as output from GPT.
+        sequence_embeddings: Sequence of token level embeddings received as output from
+            GPT.
 
     Returns:
         sentence level embedding and post-processed sequence level embedding.
@@ -163,7 +184,8 @@ def xlnet_embeddings_post_processor(
     to special tokens from the sequence embeddings.
 
     Args:
-        sequence_embeddings: Sequence of token level embeddings received as output from XLNet.
+        sequence_embeddings: Sequence of token level embeddings received as output from
+            XLNet.
 
     Returns:
         sentence level embedding and post-processed sequence level embedding.
@@ -184,7 +206,8 @@ def roberta_embeddings_post_processor(
     corresponding to special tokens from the sequence embeddings.
 
     Args:
-        sequence_embeddings: Sequence of token level embeddings received as output from Roberta
+        sequence_embeddings: Sequence of token level embeddings received as output from
+            Roberta
 
     Returns:
         sentence level embedding and post-processed sequence level embedding
@@ -206,7 +229,8 @@ def xlm_embeddings_post_processor(
     corresponding to special tokens from the sequence embeddings.
 
     Args:
-        sequence_embeddings: Sequence of token level embeddings received as output from XLM
+        sequence_embeddings: Sequence of token level embeddings received as output from
+            XLM
 
     Returns:
         sentence level embedding and post-processed sequence level embedding
@@ -222,7 +246,8 @@ def bert_tokens_cleaner(
 ) -> Tuple[List[int], List[Text]]:
     """Token cleanup method for BERT.
 
-    Clean up tokens with the extra delimiters(##) BERT adds while breaking a token into sub-tokens.
+    Clean up tokens with the extra delimiters(##) BERT adds while breaking a token into
+    sub-tokens.
 
     Args:
         token_ids: List of token ids received as output from BERT Tokenizer.
@@ -239,7 +264,8 @@ def openaigpt_tokens_cleaner(
 ) -> Tuple[List[int], List[Text]]:
     """Token cleanup method for GPT.
 
-    Clean up tokens with the extra delimiters(</w>) OpenAIGPT adds while breaking a token into sub-tokens.
+    Clean up tokens with the extra delimiters(</w>) OpenAIGPT adds while breaking a
+    token into sub-tokens.
 
     Args:
         token_ids: List of token ids received as output from GPT Tokenizer.
@@ -256,7 +282,8 @@ def gpt2_tokens_cleaner(
 ) -> Tuple[List[int], List[Text]]:
     """Token cleanup method for GPT2.
 
-    Clean up tokens with the extra delimiters(Ġ) GPT2 adds while breaking a token into sub-tokens.
+    Clean up tokens with the extra delimiters(Ġ) GPT2 adds while breaking a token into
+    sub-tokens.
 
     Args:
         token_ids: List of token ids received as output from GPT Tokenizer.
@@ -273,7 +300,8 @@ def xlnet_tokens_cleaner(
 ) -> Tuple[List[int], List[Text]]:
     """Token cleanup method for XLNet.
 
-    Clean up tokens with the extra delimiters(▁) XLNet adds while breaking a token into sub-tokens.
+    Clean up tokens with the extra delimiters(▁) XLNet adds while breaking a token into
+    sub-tokens.
 
     Args:
         token_ids: List of token ids received as output from GPT Tokenizer.

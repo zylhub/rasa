@@ -1,26 +1,35 @@
 import argparse
 import os
+import sys
 from typing import List, Text
 
-import rasa.train
+from rasa import telemetry
+from rasa.cli import SubParsersAction
 from rasa.cli.shell import shell
-from rasa.cli.utils import create_output_path, print_success, print_error_and_exit
-from rasa.constants import (
-    DEFAULT_CONFIG_PATH,
-    DEFAULT_DATA_PATH,
-    DEFAULT_DOMAIN_PATH,
+from rasa.shared.utils.cli import print_success, print_error_and_exit
+from rasa.shared.constants import (
     DOCS_BASE_URL,
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DOMAIN_PATH,
+    DEFAULT_DATA_PATH,
+    DEFAULT_MODELS_PATH,
 )
 
 
-# noinspection PyProtectedMember
 def add_subparser(
-    subparsers: argparse._SubParsersAction, parents: List[argparse.ArgumentParser]
-):
+    subparsers: SubParsersAction, parents: List[argparse.ArgumentParser]
+) -> None:
+    """Add all init parsers.
+
+    Args:
+        subparsers: subparser we are going to attach to
+        parents: Parent parsers, needed to ensure tree structure in argparse
+    """
     scaffold_parser = subparsers.add_parser(
         "init",
         parents=parents,
-        help="Creates a new project, with example training data, actions, and config files.",
+        help="Creates a new project, with example training data, "
+        "actions, and config files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     scaffold_parser.add_argument(
@@ -37,8 +46,10 @@ def add_subparser(
     scaffold_parser.set_defaults(func=run)
 
 
-def print_train_or_instructions(args: argparse.Namespace, path: Text) -> None:
+def print_train_or_instructions(args: argparse.Namespace) -> None:
+    """Train a model if the user wants to."""
     import questionary
+    import rasa
 
     print_success("Finished creating project structure.")
 
@@ -50,24 +61,24 @@ def print_train_or_instructions(args: argparse.Namespace, path: Text) -> None:
 
     if should_train:
         print_success("Training an initial model...")
-        config = os.path.join(path, DEFAULT_CONFIG_PATH)
-        training_files = os.path.join(path, DEFAULT_DATA_PATH)
-        domain = os.path.join(path, DEFAULT_DOMAIN_PATH)
-        output = os.path.join(path, create_output_path())
+        training_result = rasa.train(
+            DEFAULT_DOMAIN_PATH,
+            DEFAULT_CONFIG_PATH,
+            DEFAULT_DATA_PATH,
+            DEFAULT_MODELS_PATH,
+        )
+        args.model = training_result.model
 
-        args.model = rasa.train(domain, config, training_files, output)
-
-        print_run_or_instructions(args, path)
+        print_run_or_instructions(args)
 
     else:
         print_success(
             "No problem 👍🏼. You can also train a model later by going "
             "to the project directory and running 'rasa train'."
-            "".format(path)
         )
 
 
-def print_run_or_instructions(args: argparse.Namespace, path: Text) -> None:
+def print_run_or_instructions(args: argparse.Namespace) -> None:
     from rasa.core import constants
     import questionary
 
@@ -103,7 +114,6 @@ def print_run_or_instructions(args: argparse.Namespace, path: Text) -> None:
                 "If you want to speak to the assistant, "
                 "run 'rasa shell' at any time inside "
                 "the project directory."
-                "".format(path)
             )
         else:
             print_success(
@@ -111,17 +121,19 @@ def print_run_or_instructions(args: argparse.Namespace, path: Text) -> None:
                 "If you want to speak to the assistant, "
                 "run 'rasa shell' at any time inside "
                 "the project directory."
-                "".format(path)
             )
 
 
 def init_project(args: argparse.Namespace, path: Text) -> None:
-    create_initial_project(path)
-    print("Created project directory at '{}'.".format(os.path.abspath(path)))
-    print_train_or_instructions(args, path)
+    """Inits project."""
+    os.chdir(path)
+    create_initial_project(".")
+    print(f"Created project directory at '{os.getcwd()}'.")
+    print_train_or_instructions(args)
 
 
 def create_initial_project(path: Text) -> None:
+    """Creates directory structure and templates for initial project."""
     from distutils.dir_util import copy_tree
 
     copy_tree(scaffold_path(), path)
@@ -135,7 +147,7 @@ def scaffold_path() -> Text:
 
 def print_cancel() -> None:
     print_success("Ok. You can continue setting up by running 'rasa init' 🙋🏽‍♀️")
-    exit(0)
+    sys.exit(0)
 
 
 def _ask_create_path(path: Text) -> None:
@@ -144,11 +156,20 @@ def _ask_create_path(path: Text) -> None:
     should_create = questionary.confirm(
         f"Path '{path}' does not exist 🧐. Create path?"
     ).ask()
+
     if should_create:
-        os.makedirs(path)
+        try:
+            os.makedirs(path)
+        except (PermissionError, OSError, FileExistsError) as e:
+            print_error_and_exit(
+                f"Failed to create project path at '{path}'. " f"Error: {e}"
+            )
     else:
-        print_success("Ok. You can continue setting up by running " "'rasa init' 🙋🏽‍♀️")
-        exit(0)
+        print_success(
+            "Ok, will exit for now. You can continue setting up by "
+            "running 'rasa init' again 🙋🏽‍♀️"
+        )
+        sys.exit(0)
 
 
 def _ask_overwrite(path: Text) -> None:
@@ -167,18 +188,18 @@ def run(args: argparse.Namespace) -> None:
     print_success("Welcome to Rasa! 🤖\n")
     if args.no_prompt:
         print(
-            "To get started quickly, an "
-            "initial project will be created.\n"
-            "If you need some help, check out "
-            "the documentation at {}.\n".format(DOCS_BASE_URL)
+            f"To get started quickly, an "
+            f"initial project will be created.\n"
+            f"If you need some help, check out "
+            f"the documentation at {DOCS_BASE_URL}.\n"
         )
     else:
         print(
-            "To get started quickly, an "
-            "initial project will be created.\n"
-            "If you need some help, check out "
-            "the documentation at {}.\n"
-            "Now let's start! 👇🏽\n".format(DOCS_BASE_URL)
+            f"To get started quickly, an "
+            f"initial project will be created.\n"
+            f"If you need some help, check out "
+            f"the documentation at {DOCS_BASE_URL}.\n"
+            f"Now let's start! 👇🏽\n"
         )
 
     if args.init_dir is not None:
@@ -187,12 +208,18 @@ def run(args: argparse.Namespace) -> None:
         path = (
             questionary.text(
                 "Please enter a path where the project will be "
-                "created [default: current directory]",
-                default=".",
+                "created [default: current directory]"
             )
-            .skip_if(args.no_prompt, default=".")
+            .skip_if(args.no_prompt, default="")
             .ask()
         )
+        # set the default directory. we can't use the `default` property
+        # in questionary as we want to avoid showing the "." in the prompt as the
+        # initial value. users tend to overlook it and it leads to invalid
+        # paths like: ".C:\mydir".
+        # Can't use `if not path` either, as `None` will be handled differently (abort)
+        if path == "":
+            path = "."
 
     if args.no_prompt and not os.path.isdir(path):
         print_error_and_exit(f"Project init path '{path}' not found.")
@@ -205,5 +232,7 @@ def run(args: argparse.Namespace) -> None:
 
     if not args.no_prompt and len(os.listdir(path)) > 0:
         _ask_overwrite(path)
+
+    telemetry.track_project_init(path)
 
     init_project(args, path)

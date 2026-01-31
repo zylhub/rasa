@@ -1,0 +1,8 @@
+recipe: default.v1
+assistant_id: placeholder_default
+language: en
+pipeline:
+   - name: WhitespaceTokenizer
+   - name: CountVectorsFeaturizer
+   - name: ResponseSelector
+     epochs: 1

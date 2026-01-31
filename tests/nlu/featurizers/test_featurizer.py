@@ -1,131 +1,82 @@
+from rasa.shared.exceptions import InvalidConfigException
+from rasa.nlu.featurizers.featurizer import Featurizer
+from rasa.nlu.constants import FEATURIZER_CLASS_ALIAS
+from typing import List, Dict, Any, Text
+
 import numpy as np
 import pytest
-import scipy.sparse
 
-from rasa.nlu.featurizers.featurizer import (
-    SparseFeaturizer,
-    DenseFeaturizer,
-    sequence_to_sentence_features,
-)
-from rasa.nlu.constants import DENSE_FEATURE_NAMES, SPARSE_FEATURE_NAMES, TEXT
-from rasa.nlu.training_data import Message
-
-
-def test_combine_with_existing_dense_features():
-
-    featurizer = DenseFeaturizer()
-    attribute = DENSE_FEATURE_NAMES[TEXT]
-
-    existing_features = [[1, 0, 2, 3], [2, 0, 0, 1]]
-    new_features = [[1, 0], [0, 1]]
-    expected_features = [[1, 0, 2, 3, 1, 0], [2, 0, 0, 1, 0, 1]]
-
-    message = Message("This is a text.")
-    message.set(attribute, existing_features)
-
-    actual_features = featurizer._combine_with_existing_dense_features(
-        message, new_features, attribute
-    )
-
-    assert np.all(expected_features == actual_features)
-
-
-def test_combine_with_existing_dense_features_shape_mismatch():
-    featurizer = DenseFeaturizer()
-    attribute = DENSE_FEATURE_NAMES[TEXT]
-
-    existing_features = [[1, 0, 2, 3], [2, 0, 0, 1]]
-    new_features = [[0, 1]]
-
-    message = Message("This is a text.")
-    message.set(attribute, existing_features)
-
-    with pytest.raises(ValueError):
-        featurizer._combine_with_existing_dense_features(
-            message, new_features, attribute
-        )
-
-
-def test_combine_with_existing_sparse_features():
-    featurizer = SparseFeaturizer()
-    attribute = SPARSE_FEATURE_NAMES[TEXT]
-
-    existing_features = scipy.sparse.csr_matrix([[1, 0, 2, 3], [2, 0, 0, 1]])
-    new_features = scipy.sparse.csr_matrix([[1, 0], [0, 1]])
-    expected_features = [[1, 0, 2, 3, 1, 0], [2, 0, 0, 1, 0, 1]]
-
-    message = Message("This is a text.")
-    message.set(attribute, existing_features)
-
-    actual_features = featurizer._combine_with_existing_sparse_features(
-        message, new_features, attribute
-    )
-    actual_features = actual_features.toarray()
-
-    assert np.all(expected_features == actual_features)
-
-
-def test_combine_with_existing_sparse_features_shape_mismatch():
-    featurizer = SparseFeaturizer()
-    attribute = SPARSE_FEATURE_NAMES[TEXT]
-
-    existing_features = scipy.sparse.csr_matrix([[1, 0, 2, 3], [2, 0, 0, 1]])
-    new_features = scipy.sparse.csr_matrix([[0, 1]])
-
-    message = Message("This is a text.")
-    message.set(attribute, existing_features)
-
-    with pytest.raises(ValueError):
-        featurizer._combine_with_existing_sparse_features(
-            message, new_features, attribute
-        )
+from rasa.nlu.featurizers.dense_featurizer.dense_featurizer import DenseFeaturizer
 
 
 @pytest.mark.parametrize(
-    "features, expected",
+    "pooling, features, only_non_zero_vectors, expected",
     [
-        (None, None),
-        ([[1, 0, 2, 3], [2, 0, 0, 1]], [[2, 0, 0, 1]]),
-        (
-            scipy.sparse.coo_matrix([[1, 0, 2, 3], [2, 0, 0, 1]]),
-            scipy.sparse.coo_matrix([2, 0, 0, 1]),
-        ),
-        (
-            scipy.sparse.csr_matrix([[1, 0, 2, 3], [2, 0, 0, 1]]),
-            scipy.sparse.csr_matrix([2, 0, 0, 1]),
-        ),
-    ],
-)
-def test_sequence_to_sentence_features(features, expected):
-    actual = sequence_to_sentence_features(features)
-
-    if isinstance(expected, scipy.sparse.spmatrix):
-        assert np.all(expected.toarray() == actual.toarray())
-    else:
-        assert np.all(expected == actual)
-
-
-@pytest.mark.parametrize(
-    "pooling, features, expected",
-    [
+        # "mean"
         (
             "mean",
             np.array([[0.5, 3, 0.4, 0.1], [0, 0, 0, 0], [0.5, 3, 0.4, 0.1]]),
+            True,
             np.array([[0.5, 3, 0.4, 0.1]]),
         ),
         (
+            "mean",
+            np.array([[1.5, 3, 4.5, 6], [0, 0, 0, 0], [1.5, 3, 4.5, 6]]),
+            False,
+            np.array([[1, 2, 3, 4]]),
+        ),
+        # "max"
+        (
             "max",
             np.array([[1.0, 3.0, 0.0, 2.0], [4.0, 3.0, 1.0, 0.0]]),
+            True,
             np.array([[4.0, 3.0, 1.0, 2.0]]),
         ),
         (
             "max",
             np.array([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]),
+            True,
             np.array([[0.0, 0.0, 0.0, 0.0]]),
+        ),
+        # "max" - special cases to be aware of
+        ("max", np.array([[-1.0], [0.0]]), False, np.array([[0.0]])),
+        ("max", np.array([[-1.0], [0.0]]), True, np.array([[-1.0]])),
+    ],
+)
+def test_calculate_cls_vector(pooling, features, only_non_zero_vectors, expected):
+    actual = DenseFeaturizer.aggregate_sequence_features(
+        features, pooling_operation=pooling, only_non_zero_vectors=only_non_zero_vectors
+    )
+    assert np.all(actual == expected)
+
+
+@pytest.mark.parametrize(
+    "featurizer_configs,passes",
+    [
+        (
+            [
+                {FEATURIZER_CLASS_ALIAS: "name-1", "same": "other-params"},
+                {FEATURIZER_CLASS_ALIAS: "name-2", "same": "other-params"},
+            ],
+            True,
+        ),
+        ([{}, {}], True),
+        (
+            [
+                {FEATURIZER_CLASS_ALIAS: "same-name", "something": "else"},
+                {FEATURIZER_CLASS_ALIAS: "same-name"},
+            ],
+            False,
         ),
     ],
 )
-def test_calculate_cls_vector(pooling, features, expected):
-    actual = DenseFeaturizer._calculate_cls_vector(features, pooling)
-
-    assert np.all(actual == expected)
+def test_raise_if_featurizer_configs_are_not_compatible(
+    featurizer_configs: List[Dict[Text, Any]], passes: bool
+):
+    if passes:
+        Featurizer.raise_if_featurizer_configs_are_not_compatible(featurizer_configs)
+    else:
+        with pytest.raises(InvalidConfigException):
+            Featurizer.raise_if_featurizer_configs_are_not_compatible(
+                featurizer_configs
+            )
